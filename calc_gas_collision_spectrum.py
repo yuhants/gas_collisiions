@@ -18,7 +18,7 @@ def fmb(dp, mg, vbar):
 def xi(x):
     return np.sqrt(np.pi) * x * (1 - 2/(x**2)) * erf(x/2) * np.exp(-x**2 / 8) + 2 * np.exp(-3 * x**2 / 8)
 
-def dgamma_dp(pp_kev, A, mg_amu, p_mbar, alpha, T=293, sphere_radius=83e-9):
+def dgamma_dp(pp_kev, mg_amu, p_mbar, alpha, T=293, sphere_radius=83e-9):
     A = 4 * np.pi * (sphere_radius)**2  # Surface area of sphere (m^2)
 
     pp = pp_kev * 1000 * ev2SI
@@ -47,7 +47,7 @@ def zeta(a, c, d):
 
     return prefactor * ((first_0 + first_1) + second_pre * second) / denominator
     
-def dgamma_dp_diffuse(pp_kev, A, mg_amu, p_mbar, tl=293, th=300, sphere_radius=83e-9):
+def dgamma_dp_diffuse(pp_kev, mg_amu, p_mbar, tl=293, th=300, sphere_radius=83e-9):
     A = 4 * np.pi * (sphere_radius)**2  # Surface area of sphere (m^2)
 
     pp = pp_kev * 1000 * ev2SI      # N s
