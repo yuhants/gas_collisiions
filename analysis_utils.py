@@ -18,7 +18,7 @@ def load_plotting_setting():
     # colors=['#fe9f6d', '#de4968', '#8c2981', '#3b0f70', '#000004']
     # colors = plt.colormaps.get_cmap('tab20b').resampled(6).colors
     cmap = plt.colormaps.get_cmap('viridis')
-    colors = cmap(np.linspace(0.2, 0.9, 5))
+    colors = cmap(np.linspace(0.1, 0.95, 5))
 
     default_cycler = cycler(color=colors)
     
@@ -60,17 +60,17 @@ def notch_filtered(data, fs, f0=93000, q=50):
     filtered = filtfilt(b, a, data)
     return filtered
 
-def bandpass_filtered(data, fs, f_low=10000, f_high=100000, order=3): 
+def bandpass_filtered(data, fs, f_low=10000, f_high=100000, order=2): 
     sos_bp = butter(order, [f_low, f_high], 'bandpass', fs=fs, output='sos')
     filtered = sosfilt(sos_bp, data)
     return filtered
 
-def lowpass_filtered(tod, fs, f_lp=50000, order=3):
+def lowpass_filtered(tod, fs, f_lp=50000, order=2):
     sos_lp = butter(order, f_lp, 'lp', fs=fs, output='sos')
     filtered = sosfilt(sos_lp, tod)
     return filtered
 
-def highpass_filtered(tod, fs, f_hp=50000, order=3):
+def highpass_filtered(tod, fs, f_hp=50000, order=2):
     sos_hp = butter(order, f_hp, 'hp', fs=fs, output='sos')
     filtered = sosfilt(sos_hp, tod)
     return filtered
@@ -103,7 +103,7 @@ def get_area_driven_peak(ffd, ppd, passband=(88700, 89300), noise_floor=None, pl
         fig, ax = plt.subplots(1, 1, figsize=(7, 5))
         ax.plot(ffd[all_idx], ppd[all_idx])
         ax.set_xlabel('Frequency (Hz)')
-        ax.set_ylabel('Spectral density ($V^2 / Hz$)')
+        ax.set_ylabel('Spectral density (V$^2$ / Hz)')
         ax.set_yscale('log')
         plt.show()
 
@@ -237,8 +237,8 @@ def get_pulse_idx(drive_sig, trigger_val=0.5, positive=True):
     else:
         return np.flatnonzero((drive_sig[:-1] > trigger_val) & (drive_sig[1:] < trigger_val))+1
 
-def get_analysis_window(tt, pulse_idx, length):
-    window = np.full(tt.size, True)
+def get_analysis_window(dd, pulse_idx, length):
+    window = np.full(dd.size, True)
     pulse_idx_in_window = length
 
     if length < pulse_idx:
@@ -248,7 +248,7 @@ def get_analysis_window(tt, pulse_idx, length):
         # so it's not in the middle of the window
         pulse_idx_in_window = pulse_idx
 
-    if (pulse_idx + length) < (tt.size-1):
+    if (pulse_idx + length) < (dd.size-1):
         window[pulse_idx+length:] = False
     
     return window, pulse_idx_in_window
@@ -294,7 +294,8 @@ def recon_pulse(idx, dtt, zz_bp, dd,
                 prepulse_window_length=5000,
                 search_window_length=20,
                 pulse_length=20,
-                lowpass_freq=80000):
+                lowpass_freq=60000,
+                lowpass_order=2):
 
     if idx < prepulse_window_length:
         print('Skipping pulse too close to the beginning of the file')
@@ -321,15 +322,13 @@ def recon_pulse(idx, dtt, zz_bp, dd,
     amp = get_pulse_amp(dtt, zz_bp[window], omega0_fit, (ff[1]-ff[0])*2*np.pi)
 
     # Low pass the reconstructed amplitude to reject high frequency noise
-    ## Modified 20241104
-    ## Change lowpass from 100 to 80 kHz
-    amp_lp = lowpass_filtered(amp, fs, lowpass_freq, 3)
+    amp_lp = lowpass_filtered(amp, fs, lowpass_freq, lowpass_order)
 
     # Search the absolute value because homodyne could lock differently from time to time
     search_window = get_search_window(amp, pulse_idx_in_window, search_window_length, pulse_length)
     recon_amp = np.max(np.abs(amp_lp[search_window])/1e9)
 
-    return window, amp, amp_lp, recon_amp
+    return window, amp/1e9, amp_lp/1e9, recon_amp
 
 def fit_amps_gaus(normalized_amps, bins=None, noise=False, return_bins=False):
     hhs, bcs, gps = [], [], []
@@ -367,7 +366,8 @@ def get_unnormalized_amps(data_files,
                           prepulse_window_length=50000,
                           search_window_length=250,
                           search_offset_length=20,
-                          lowpass_freq=80000
+                          lowpass_freq=80000,
+                          lowpass_order=2
                           ):
     amps = []
     for file in data_files:
@@ -376,10 +376,10 @@ def get_unnormalized_amps(data_files,
         zz, dd = nn[0], nn[1]
 
         if notch_freq is not None:
-            zz = notch_filtered(zz, fs, f0=119000, q=50)
+            zz = notch_filtered(zz, fs, f0=notch_freq, q=50)
 
         bandpass_lb, bandpass_ub = passband
-        zz_bp = bandpass_filtered(zz, fs, bandpass_lb, bandpass_ub)
+        zz_bp = bandpass_filtered(zz, fs, bandpass_lb, bandpass_ub, lowpass_order)
 
         trigger_level = positive_pulse * 0.5
         pulse_idx = get_pulse_idx(dd, trigger_level, positive_pulse)
@@ -404,7 +404,8 @@ def get_unnormalized_amps(data_files,
                                                prepulse_window_length, 
                                                search_window_length, 
                                                search_offset_length,
-                                               lowpass_freq)
+                                               lowpass_freq,
+                                               lowpass_order)
 
             if noise:
                 if np.isnan(amp):
@@ -440,3 +441,16 @@ def get_pulse_times(data_files, positive_pulse, prepulse_window_length, analysis
         pulse_times.append(timestamp + dtt*good_pulse_idx)
     
     return np.concatenate(pulse_indices), np.concatenate(pulse_times)
+
+def recon_force(dtt, zz_bp, f_lp, lowpass_order):
+    fs = int(np.ceil(1 / dtt))
+
+    zzk = rfft(zz_bp)
+    ff = rfftfreq(zz_bp.size, dtt)
+    pp = np.abs(zzk)**2 / (zz_bp.size / dtt)
+
+    omega0_fit = ff[np.argmax(pp)] * 2 * np.pi
+    amp = get_pulse_amp(dtt, zz_bp, omega0_fit, (ff[1]-ff[0])*2*np.pi)    
+    amp_lp = lowpass_filtered(amp, fs, f_lp, lowpass_order)
+
+    return amp/1e9, amp_lp/1e9
