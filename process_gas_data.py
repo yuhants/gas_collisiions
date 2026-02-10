@@ -5,37 +5,28 @@ import h5py
 from scipy.signal import decimate
 import analysis_utils as utils
 
-# sphere = 'sphere_20251212'
 sphere = 'sphere_20260105'
 
 ## Analysis settings
 # bandpass_lb, bandpass_ub = (35000, 70000) # Analysis bandwidth in Hz (Sphere 20251212)
-bandpass_lb, bandpass_ub = (39000, 74000) # Analysis bandwidth in Hz (Sphere 20260105)
+bandpass_lb, bandpass_ub = (39000, 74000)  # Analysis bandwidth in Hz (Sphere 20260105)
 lowpass_order = 3
 notch_freq = 137000
 
 analysis_window_length = 2**19    # Length of analysis window in number of indices
 search_window_length   = 2**8     # 50 us search window
-sigma_p_amp = 0.01304540266635899
 
-# datasets = ['20251217_unknown_5e-8mbar_kryptonpumped', '20251216_unknown_6e-8mbar_cryopumped']
-# data_prefixs = ['20251217_df_', '20251216_df_']
+# For calculating chi2, we simply assume an approximate 60 keV sigma
+sigma_p_amp = 60 / 6792.86423779262
+
+# datasets = ['20260107_p8e_4e-8mbar', '20260107_p8e_3e-8mbar_valveclosed']
+# data_prefixs = ['20260107_df_', '20260107_df_']
 # types = ['background_data', 'background_data']
-# nfiles = [300, 300]
+# nfiles = [150, 150]
 
-# datasets = ['20251215_p8e_2e-7mbar']
-# data_prefixs = ['20251215_df_']
-# types = ['xenon_data']
-# nfiles = [400]
-
-# datasets = ['20251217_unknown_5e-8mbar', '20251217_unknown_7e-8mbar', '20251217_unknown_2e-7mbar']
-# data_prefixs = ['20251217_df_', '20251217_df_', '20251217_df_']
-# types = ['krypton_data', 'krypton_data', 'krypton_data']
-# nfiles = [300, 300, 300]
-
-datasets = ['20260107_p8e_3e-8mbar_valveclosed']
+datasets = ['20260107_p8e_5e-8mbar']
 data_prefixs = ['20260107_df_']
-types = ['background_data']
+types = ['xenon_data']
 nfiles = [150]
 
 # datasets = ['20260107_p8e_6e-8mbar', '20260107_p8e_8e-8mbar', '20260107_p8e_1e-7mbar', '20260107_p8e_2e-7mbar']
@@ -65,8 +56,8 @@ def bad_detection_quality(zz_windowed, zz_bp_windowed):
     if np.sum(convolved < 1e-3) > 0:
         return True
 
-def get_normalized_template(bounds=(1250, 1750), downsampled=False):
-    pulse_shape_file = np.load(rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/sphere_20251212_pulse_shape_template_combined.npz')
+def get_normalized_template(sphere, bounds=(1250, 1750), downsampled=False):
+    pulse_shape_file = np.load(rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}_pulse_shape_template_combined.npz')
     pulse_shape_template = pulse_shape_file['ps_20v']
 
     normalized_template = pulse_shape_template / np.max(pulse_shape_template)
@@ -96,6 +87,17 @@ def calc_chisquares(amp_lp, indices_in_window, normalized_template, sigma_amp):
         ret[i] = np.sum( ((waveform - template_scaled)/sigma_amp)**2 )
     return ret
 
+def get_driven_power(dt, zz_windowed, drive_freq):
+    ff, pp = utils.get_psd(dt=dt, zz=zz_windowed, nperseg=2**16)
+    noise_idx = np.logical_and(ff > 150000, ff < 175000)
+    noise_floor = np.mean(pp[noise_idx])
+
+    search_idx = np.logical_and(ff > 30000, ff < 60000)
+    f_res = ff[search_idx][np.argmax(pp[search_idx])]
+
+    drive_area = utils.get_area_driven_peak(ff, pp, passband=(drive_freq-100, drive_freq+100), noise_floor=noise_floor, plot=False)
+    return f_res, drive_area
+
 def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
     data_dir = rf'/Volumes/LaCie/gas_collisions/{type}/{sphere}/{dataset}'
     out_dir = rf'/Users/yuhan/work/nanospheres/data/gas_data_processed/{sphere}/{type}/{dataset}'
@@ -103,7 +105,7 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
     if not os.path.isdir(out_dir):
         os.mkdir(out_dir)
 
-    # normalized_template = get_normalized_template(bounds=(1250, 1750), downsampled=False)
+    normalized_template = get_normalized_template(sphere, bounds=(1250, 1750), downsampled=False)
 
     for i in range(nfile):
         outfile_name = f'{data_prefix}{i+idx_start}_processed.hdf5'
@@ -115,18 +117,20 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
         fs = int(np.ceil(1 / dtt))   # Sampling rate at Hz
         zz = f['data']['channel_d'][:] * f['data']['channel_d'].attrs['adc2mv'] / 1e3  # Signal in V
         
-        zz = utils.notch_filtered(zz, fs, f0=notch_freq, q=50)
-        zz_bp = utils.bandpass_filtered(zz, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
+        zz_notched = utils.notch_filtered(zz, fs, f0=notch_freq, q=50)
+        zz_bp = utils.bandpass_filtered(zz_notched, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
 
         zz_bp_shaped = np.reshape(zz_bp, (int(zz_bp.size / analysis_window_length), analysis_window_length))
-        zz_shaped = np.reshape(zz, (int(zz_bp.size / analysis_window_length), analysis_window_length))
+        zz_shaped = np.reshape(zz, (int(zz.size / analysis_window_length), analysis_window_length))
 
         # Minus 3 because trowing away 2/1 amplitudes at the beginning/end of the analysis window
         amp_all         = np.empty(shape=(zz_bp_shaped.shape[0], int(analysis_window_length/search_window_length)-3), dtype=np.float64)
         idx_in_window   = np.empty(shape=(zz_bp_shaped.shape[0], int(analysis_window_length/search_window_length)-3), dtype=np.int16)
         good_detection  = np.full(shape=zz_bp_shaped.shape[0], fill_value=True)
-        # chisquare       = np.empty_like(amp_all)
+        chisquare       = np.empty_like(amp_all)
         noise_level_amp = np.empty(shape=zz_bp_shaped.shape[0])
+        f_res           = np.empty(shape=zz_bp_shaped.shape[0])
+        drive_area      = np.empty(shape=zz_bp_shaped.shape[0])
 
         lb, ub = 2 * search_window_length, -1 * search_window_length
         for j, _zz_bp in enumerate(zz_bp_shaped):
@@ -142,7 +146,7 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
             amp_all[j] = amp_lp[amp_searched_idx_in_window]
 
             # Calculate chi2 for each amplitude
-            # chisquare[j] = calc_chisquares(amp_lp, amp_searched_idx_in_window, normalized_template, sigma_amp=sigma_p_amp)
+            chisquare[j] = calc_chisquares(amp_lp, amp_searched_idx_in_window, normalized_template, sigma_amp=sigma_p_amp)
 
             # Noise level in amplitude in the time window
             noise_level_amp[j] = np.std(amp_lp[lb:ub])
@@ -150,6 +154,9 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
             # Identify period of poor detection quality
             if bad_detection_quality(zz_shaped[j], zz_bp_shaped[j]):
                 good_detection[j] = False
+
+            # Caculate the power of the driven tone
+            f_res[j], drive_area[j] = get_driven_power(dtt, zz_shaped[j], notch_freq)
 
         with h5py.File(os.path.join(out_dir, outfile_name), 'w') as fout:
             print(f'Writing file {os.path.join(out_dir, outfile_name)}')
@@ -163,7 +170,9 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
 
             g.create_dataset('good_detection', data=good_detection, dtype=np.bool_)
             g.create_dataset('noise_level_amp', data=noise_level_amp, dtype=np.float64)
-            # g.create_dataset('chisquare', data=chisquare, dtype=np.float64)
+            g.create_dataset('f_res', data=f_res, dtype=np.float64)
+            g.create_dataset('driven_power', data=drive_area, dtype=np.float64)
+            g.create_dataset('chisquare', data=chisquare, dtype=np.float64)
 
             fout.close()
 

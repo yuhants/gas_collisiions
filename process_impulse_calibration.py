@@ -17,7 +17,6 @@ dataset = '20260107_p8e_4e-8mbar_d137khz_3'
 data_prefix = '20260107_dfg_p8e_200ns_'
 
 # voltages = [20]
-# voltages = [2.5]
 voltages = [2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]
 
 data_folder = rf'/Volumes/LaCie/gas_collisions/pulse_calibration/{sphere}/{dataset}'
@@ -53,6 +52,20 @@ def get_pulse_shape(zz_bp_in_window, f_lp, amp, length=1500, is_scaled=False):
     # Get 50 us around the maximum amplitude
     return zz_ret, ret
 
+def get_drive_area(idx, window_length, zz, drive_freq):
+    window = utils.get_prepulse_window(dd, idx, window_length)
+    zz_windowed = zz[window]
+
+    ff, pp = utils.get_psd(dt=dtt, zz=zz_windowed, nperseg=2**16)
+    noise_idx = np.logical_and(ff > 150000, ff < 175000)
+    noise_floor = np.mean(pp[noise_idx])
+
+    search_idx = np.logical_and(ff > 30000, ff < 60000)
+    f_res = ff[search_idx][np.argmax(pp[search_idx])]
+
+    drive_area = utils.get_area_driven_peak(ff, pp, passband=(drive_freq-100, drive_freq+100), noise_floor=noise_floor, plot=False)
+    return f_res, drive_area
+
 if __name__ == '__main__':
 
     with h5py.File(os.path.join(out_dir, outfile), 'w') as fout:
@@ -64,6 +77,8 @@ if __name__ == '__main__':
             data_files = glob.glob(combined_path)
 
             zz_pulses, pulse_shapes, amps = [], [], []
+            fs_res, drive_areas = [], []
+
             if v == 2.5:
                 amps_noise, amps_noise_search = [], []
 
@@ -72,9 +87,9 @@ if __name__ == '__main__':
                 fs = int(np.ceil(1 / dtt))
                 zz, dd = nn[0], nn[1]
 
-                zz = utils.notch_filtered(zz, fs, f0=notch_freq, q=50)
+                zz_notched = utils.notch_filtered(zz, fs, f0=notch_freq, q=50)
                 # First loosely bandpass the z signal
-                zz_bp = utils.bandpass_filtered(zz, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
+                zz_bp = utils.bandpass_filtered(zz_notched, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
                 
                 # Extract the pulse position
                 trigger_level = 0.5 * positive_pulse
@@ -88,6 +103,8 @@ if __name__ == '__main__':
                     if window is None:
                         continue
 
+                    f_res, drive_area = get_drive_area(pulse_idx, fit_window_length, zz, notch_freq)
+
                     # If the amplitude has already been scaled by 1e9, as is now implemented,
                     # then set ``is_scaled`` to True
                     zz_pulse, pulse_shape = get_pulse_shape(zz_bp[window], f_lp, amp, 1500, is_scaled=True)
@@ -99,6 +116,8 @@ if __name__ == '__main__':
                     zz_pulses.append(zz_pulse)
                     pulse_shapes.append(pulse_shape)
                     amps.append(amp)
+                    drive_areas.append(drive_area)
+                    fs_res.append(f_res)
         
                 if v == 2.5:
                     for noise_idx in noise_indices:
@@ -114,6 +133,10 @@ if __name__ == '__main__':
 
             g.create_dataset(f'amplitudes_{v}v', data=np.asarray(amps), dtype=np.float64)
             g.create_dataset(f'pulse_shapes_{v}v', data=np.asarray(pulse_shapes), dtype=np.float64)
+            g.create_dataset(f'z_signal_{v}v', data=np.asarray(zz_pulses), dtype=np.float64)
+            g.create_dataset(f'drive_area_{v}v', data=np.asarray(drive_areas), dtype=np.float64)
+            g.create_dataset(f'f_res_{v}v', data=np.asarray(fs_res), dtype=np.float64)
+
             if v == 2.5:
                 g.create_dataset(f'amplitudes_noise_{v}v', data=np.asarray(amps_noise), dtype=np.float64)
                 g.create_dataset(f'amplitudes_noise_search_{v}v', data=np.asarray(amps_noise_search), dtype=np.float64)

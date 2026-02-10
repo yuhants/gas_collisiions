@@ -109,8 +109,8 @@ def get_area_driven_peak(ffd, ppd, passband=(88700, 89300), noise_floor=None, pl
 
     return v2_drive
 
-def get_c_mv(data_files_ordered, vp2p, omegad, passband, searchband=(25000, 40000), charge=3, n_chunk=10, efield=106, return_psds=False):
-    m = 2000 * (83e-9**3) * (4 / 3) * np.pi  # sphere mass
+def get_c_mv(data_files_ordered, vp2p, omegad, passband, searchband=(25000, 40000), charge=3, n_chunk=10, efield=106, return_psds=False, sphere_radius=50e-9):
+    m = 2000 * (sphere_radius**3) * (4 / 3) * np.pi  # sphere mass
     
     data_files_ordered = np.asarray(data_files_ordered)
     vp2p = np.asarray(vp2p)
@@ -138,7 +138,7 @@ def get_c_mv(data_files_ordered, vp2p, omegad, passband, searchband=(25000, 4000
         c_cal = []
         for j, ff in enumerate(ffss[i]):
             pp = ppss[i][j]
-            v2_drive = get_area_driven_peak(ff, pp, passband=passband, noise_floor=0, plot=False)
+            v2_drive = get_area_driven_peak(ff, pp, passband=passband, noise_floor=None, plot=False)
 
             idx_band = np.logical_and(ff > searchband[0], ff < searchband[1])
             omega0 = 2 * np.pi * ff[idx_band][np.argmax(pp[idx_band])]
@@ -190,8 +190,8 @@ def gaussian_convolved_lineshape(omega, A, omega0, sigma, gamma):
     convolved_lineshape = np.convolve(gauss_kernel, actual_lineshape, 'same')
     return np.interp(omega, xx, convolved_lineshape)
 
-def get_effective_force_noise(_file, c_mv, int_band=(20000, 50000), fit_band=(29000, 32000), nperseg=2**17, plot_fit=False, p0=None):
-    m = 2000 * (83e-9**3) * (4 / 3) * np.pi  # sphere mass
+def get_effective_force_noise(_file, c_mv, int_band=(20000, 50000), fit_band=(29000, 32000), nperseg=2**17, plot_fit=False, p0=None, sphere_radius=50e-9):
+    m = 2000 * (sphere_radius**3) * (4 / 3) * np.pi  # sphere mass
 
     dtt, nn = load_timestreams(_file, ['D'])
     fs = int(np.ceil(1 / dtt))
@@ -205,11 +205,12 @@ def get_effective_force_noise(_file, c_mv, int_band=(20000, 50000), fit_band=(29
         fig, ax = plt.subplots(1, 1, figsize=(6, 4))
         ax.plot(ff/1000, sz_measured, 'b')
         ax.plot(ff/1000, voigt(ff*2*np.pi, A, omega0, sigma, gamma_voigt), 'r')
+        ax.set_yscale('log')
+        ax.set_ylim(1e-28, 1e-19)
+        ax.set_xlim(10, 100)
         ax.set_xlabel('Frequency (kHz)')
         ax.set_ylabel(r'$S_z[\omega] (\mathrm{m}^2/\mathrm{Hz})$')
-        ax.set_yscale('log')
-        ax.set_xlim(10, 100)
-        plt.plot()
+        # plt.plot()
 
     gamma = gamma_voigt * 2
     # Use the sigma and gamma extracted from voigt fit
@@ -334,6 +335,8 @@ def fit_amps_gaus(normalized_amps, bins=None, noise=False, return_bins=False):
     hhs, bcs, gps = [], [], []
     bins_ret = []
     for amp in normalized_amps:
+        if amp.size == 0:
+            continue
         if bins is None:
             bin = np.linspace(0, np.max(amp)*1.5, 50)
         else:
