@@ -17,7 +17,7 @@ analysis_window_length = 2**19    # Length of analysis window in number of indic
 search_window_length   = 2**8     # 50 us search window
 
 # For calculating chi2, we simply assume an approximate 60 keV sigma
-sigma_p_amp = 60 / 6792.86423779262
+sigma_p_amp = 60 / 6792.86423779262  # Sphere 20260105
 
 # datasets = ['20260107_p8e_4e-8mbar', '20260107_p8e_3e-8mbar_valveclosed']
 # data_prefixs = ['20260107_df_', '20260107_df_']

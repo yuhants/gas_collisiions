@@ -12,9 +12,17 @@ import matplotlib.pyplot as plt
 # dataset = '20251215_p8e_5e-8mbar_d137khz_1'
 # data_prefix = '20251215_dfg_p8e_200ns_'
 
-sphere = 'sphere_20260105'
-dataset = '20260107_p8e_4e-8mbar_d137khz_3'
-data_prefix = '20260107_dfg_p8e_200ns_'
+# sphere = 'sphere_20260105'
+# dataset = '20260107_p8e_4e-8mbar_d137khz_3'
+# data_prefix = '20260107_dfg_p8e_200ns_'
+
+sphere = 'sphere_20260215'
+# dataset = '20260219_p6e_4e-8mbar_d137khz_0'
+# dataset = '20260219_p6e_4e-8mbar_d137khz_1_afterxe'
+# dataset = '20260219_p6e_4e-8mbar_d137khz_2_afterkr'
+dataset = '20260219_p6e_4e-8mbar_d137khz_3_aftersf6'
+
+data_prefix = '20260219_dfg_p6e_200ns_'
 
 # voltages = [20]
 voltages = [2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]
@@ -26,13 +34,16 @@ outfile = f'{dataset}_processed.hdf5'
 
 ## Analysis settings
 # bandpass_lb, bandpass_ub = (35000, 70000) # Analysis bandwidth in Hz (Sphere 20251212)
-bandpass_lb, bandpass_ub = (39000, 74000) # Analysis bandwidth in Hz (Sphere 20260105)
+# bandpass_lb, bandpass_ub = (39000, 74000) # Analysis bandwidth in Hz (Sphere 20260105)
+bandpass_lb, bandpass_ub = (38000, 75000) # Analysis bandwidth in Hz (Sphere 20260215)
+
 lowpass_order = 3
 positive_pulse = True
 notch_freq = 137000
 
 fit_window_length = 2**19                 # Window length to fit for frequencies
 analysis_window_length = 2**18            # Length of analysis window in number of indices
+search_window_length = 2**8
 
 def get_pulse_shape(zz_bp_in_window, f_lp, amp, length=1500, is_scaled=False):
     if not is_scaled:
@@ -50,7 +61,7 @@ def get_pulse_shape(zz_bp_in_window, f_lp, amp, length=1500, is_scaled=False):
     zz_ret = zz_bp_in_window[pulse_idx_in_win - length : pulse_idx_in_win + length]
 
     # Get 50 us around the maximum amplitude
-    return zz_ret, ret
+    return zz_ret, ret, pulse_idx_in_win
 
 def get_drive_area(idx, window_length, zz, drive_freq):
     window = utils.get_prepulse_window(dd, idx, window_length)
@@ -76,7 +87,7 @@ if __name__ == '__main__':
             combined_path = os.path.join(data_folder, f'{data_prefix}{v}v*.hdf5')
             data_files = glob.glob(combined_path)
 
-            zz_pulses, pulse_shapes, amps = [], [], []
+            zz_pulses, pulse_shapes, amps, pulse_indices_in_win = [], [], [], []
             fs_res, drive_areas = [], []
 
             if v == 2.5:
@@ -99,7 +110,7 @@ if __name__ == '__main__':
                 for pulse_idx in pulse_indices:
                     window, f, f_lp, amp = utils.recon_pulse(pulse_idx, dtt, zz_bp, dd, 
                                                              analysis_window_length, 
-                                                             fit_window_length, 250, 20, bandpass_ub, lowpass_order)
+                                                             fit_window_length, search_window_length, 20, bandpass_ub, lowpass_order)
                     if window is None:
                         continue
 
@@ -107,7 +118,7 @@ if __name__ == '__main__':
 
                     # If the amplitude has already been scaled by 1e9, as is now implemented,
                     # then set ``is_scaled`` to True
-                    zz_pulse, pulse_shape = get_pulse_shape(zz_bp[window], f_lp, amp, 1500, is_scaled=True)
+                    zz_pulse, pulse_shape, pulse_idx_in_win = get_pulse_shape(zz_bp[window], f_lp, amp, 1500, is_scaled=True)
 
                     if pulse_shape.size != 3000:
                         print('Skipping pulse near the end of file')
@@ -116,6 +127,7 @@ if __name__ == '__main__':
                     zz_pulses.append(zz_pulse)
                     pulse_shapes.append(pulse_shape)
                     amps.append(amp)
+                    pulse_indices_in_win.append(pulse_idx_in_win)
                     drive_areas.append(drive_area)
                     fs_res.append(f_res)
         
@@ -123,7 +135,7 @@ if __name__ == '__main__':
                     for noise_idx in noise_indices:
                         window, f, f_lp, amp = utils.recon_pulse(noise_idx, dtt, zz_bp, dd, 
                                                                  analysis_window_length, 
-                                                                 fit_window_length, 250, 20, bandpass_ub, lowpass_order)
+                                                                 fit_window_length, search_window_length, 20, bandpass_ub, lowpass_order)
                         if window is None:
                             continue
                         
@@ -133,6 +145,7 @@ if __name__ == '__main__':
 
             g.create_dataset(f'amplitudes_{v}v', data=np.asarray(amps), dtype=np.float64)
             g.create_dataset(f'pulse_shapes_{v}v', data=np.asarray(pulse_shapes), dtype=np.float64)
+            g.create_dataset(f'pulse_indices_in_win_{v}v', data=np.asarray(pulse_indices_in_win), dtype=np.int32)
             g.create_dataset(f'z_signal_{v}v', data=np.asarray(zz_pulses), dtype=np.float64)
             g.create_dataset(f'drive_area_{v}v', data=np.asarray(drive_areas), dtype=np.float64)
             g.create_dataset(f'f_res_{v}v', data=np.asarray(fs_res), dtype=np.float64)

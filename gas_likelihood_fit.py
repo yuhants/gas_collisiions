@@ -12,7 +12,8 @@ from multiprocessing import Pool
 sphere = 'sphere_20260105'
 length_search_window = 5e-5  # length of the search window (50 us)
 
-eff_coefs = [2.88150446e+02, 1.08156304e-02]
+eff_coefs = [1.07617456e+02, 7.92304675e-03] # 20260216: eff derived by counting pulses using timing
+# eff_coefs = [2.88150446e+02, 1.08156304e-02]
 eff_chi2  = 1
 fit_band = (250, 400)
 nll_offset = 0
