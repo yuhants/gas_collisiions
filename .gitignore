@@ -7,3 +7,5 @@ __pycache__/
 
 # Data files
 *.hdf5
+*.h5
+*.h5py
