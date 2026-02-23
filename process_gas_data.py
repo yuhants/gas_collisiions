@@ -5,34 +5,76 @@ import h5py
 from scipy.signal import decimate
 import analysis_utils as utils
 
-sphere = 'sphere_20260105'
+sphere = 'sphere_20260215'
 
-## Analysis settings
-# bandpass_lb, bandpass_ub = (35000, 70000) # Analysis bandwidth in Hz (Sphere 20251212)
-bandpass_lb, bandpass_ub = (39000, 74000)  # Analysis bandwidth in Hz (Sphere 20260105)
+# ============================================================
+# CONFIG — edit these before running
+# ============================================================
+
+# Bandpass filter bounds (Hz)
+# bandpass_lb, bandpass_ub = (35000, 70000)  # sphere_20251212
+# bandpass_lb, bandpass_ub = (39000, 74000)  # sphere_20260105
+bandpass_lb, bandpass_ub = (38000, 75000)    # sphere_20260215
+
+# Voltage-to-energy calibration factor
+# amp2kev = 6792.86423779262  # sphere_20260105
+amp2kev = 8363.560351624732   # sphere_20260215
+
+# Datasets to process, grouped by gas type.
+# Each entry: (dataset_name, data_type_folder, file_prefix, n_files)
+datasets_config = {
+    'background': [
+        ('20260219_p6e_4e-8mbar',                'background_data', '20260219_dfg_', 25),
+        ('20260219_p6e_3e-8mbar_xevalveclosed',  'background_data', '20260219_dfg_', 25),
+        ('20260219_p6e_3e-8mbar_krvalveclosed',  'background_data', '20260219_dfg_', 25),
+        ('20260219_p6e_3e-8mbar_sf6valveclosed', 'background_data', '20260219_dfg_', 25),
+    ],
+    'xenon': [
+        ('20260219_p6e_1e-6mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_8e-7mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_4e-7mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_4e-7mbar_1', 'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_2e-7mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_1e-7mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_1e-7mbar_1', 'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_7e-8mbar',   'xenon_data', '20260219_dfg_', 25),
+        ('20260219_p6e_5e-8mbar',   'xenon_data', '20260219_dfg_', 25),
+    ],
+    'krypton': [
+        ('20260219_p6e_1e-6mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_7e-7mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_5e-7mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_2e-7mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_1e-7mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_7e-8mbar', 'krypton_data', '20260219_dfg_', 25),
+        ('20260219_p6e_5e-8mbar', 'krypton_data', '20260219_dfg_', 25),
+    ],
+    'sf6': [
+        ('20260219_p6e_1e-6mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_7e-7mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_5e-7mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_3e-7mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_3e-7mbar_1', 'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_1e-7mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_7e-8mbar',   'sf6_data', '20260219_dfg_', 25),
+        ('20260219_p6e_5e-8mbar',   'sf6_data', '20260219_dfg_', 25),
+    ],
+}
+# ============================================================
+
+# Impulse reconstruction filter settting
 lowpass_order = 3
 notch_freq = 137000
+
+# Params for identifying pulse indices
+positive_pulse = True
+trigger_val = 0.5 * positive_pulse
 
 analysis_window_length = 2**19    # Length of analysis window in number of indices
 search_window_length   = 2**8     # 50 us search window
 
 # For calculating chi2, we simply assume an approximate 60 keV sigma
-sigma_p_amp = 60 / 6792.86423779262  # Sphere 20260105
-
-# datasets = ['20260107_p8e_4e-8mbar', '20260107_p8e_3e-8mbar_valveclosed']
-# data_prefixs = ['20260107_df_', '20260107_df_']
-# types = ['background_data', 'background_data']
-# nfiles = [150, 150]
-
-datasets = ['20260107_p8e_5e-8mbar']
-data_prefixs = ['20260107_df_']
-types = ['xenon_data']
-nfiles = [150]
-
-# datasets = ['20260107_p8e_6e-8mbar', '20260107_p8e_8e-8mbar', '20260107_p8e_1e-7mbar', '20260107_p8e_2e-7mbar']
-# data_prefixs = ['20260107_df_', '20260107_df_', '20260107_df_', '20260107_df_']
-# types = ['xenon_data', 'xenon_data', 'xenon_data', 'xenon_data']
-# nfiles = [150, 150, 150, 150]
+sigma_p_amp = 60 / amp2kev
 
 def get_idx_in_window(amp_searched_idx, search_window_length, lb):
     ret = np.empty_like(amp_searched_idx)
@@ -44,7 +86,7 @@ def get_idx_in_window(amp_searched_idx, search_window_length, lb):
 
 def bad_detection_quality(zz_windowed, zz_bp_windowed):
     # Z signal out of balance, meaning that homodyne losing lock
-    if np.abs(np.mean(zz_windowed)) > 0.25:
+    if np.abs(np.mean(zz_windowed)) > 0.5:
         return True
     
     if np.max(np.abs(zz_windowed)) > 0.95:
@@ -117,6 +159,10 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
         fs = int(np.ceil(1 / dtt))   # Sampling rate at Hz
         zz = f['data']['channel_d'][:] * f['data']['channel_d'].attrs['adc2mv'] / 1e3  # Signal in V
         
+        # Identify the position of applied impulses
+        gg = f['data']['channel_g'][:] * f['data']['channel_g'].attrs['adc2mv'] / 1e3  # Signal in V
+        pulse_indices = utils.get_pulse_idx(gg, trigger_val, positive_pulse)
+
         zz_notched = utils.notch_filtered(zz, fs, f0=notch_freq, q=50)
         zz_bp = utils.bandpass_filtered(zz_notched, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
 
@@ -125,7 +171,7 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
 
         # Minus 3 because trowing away 2/1 amplitudes at the beginning/end of the analysis window
         amp_all         = np.empty(shape=(zz_bp_shaped.shape[0], int(analysis_window_length/search_window_length)-3), dtype=np.float64)
-        idx_in_window   = np.empty(shape=(zz_bp_shaped.shape[0], int(analysis_window_length/search_window_length)-3), dtype=np.int16)
+        idx_in_window   = np.empty(shape=(zz_bp_shaped.shape[0], int(analysis_window_length/search_window_length)-3), dtype=np.int32)
         good_detection  = np.full(shape=zz_bp_shaped.shape[0], fill_value=True)
         chisquare       = np.empty_like(amp_all)
         noise_level_amp = np.empty(shape=zz_bp_shaped.shape[0])
@@ -144,6 +190,7 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
             amp_searched_idx = np.argmax(amp_reshaped, axis=1)
             amp_searched_idx_in_window = get_idx_in_window(amp_searched_idx, search_window_length, lb)
             amp_all[j] = amp_lp[amp_searched_idx_in_window]
+            idx_in_window[j] = amp_searched_idx_in_window
 
             # Calculate chi2 for each amplitude
             chisquare[j] = calc_chisquares(amp_lp, amp_searched_idx_in_window, normalized_template, sigma_amp=sigma_p_amp)
@@ -165,8 +212,9 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
             g.attrs['pressure_mbar'] = f['data'].attrs['pressure_mbar']
             g.attrs['timestamp'] = f['data'].attrs['timestamp']
 
+            g.create_dataset('pulse_indices', data=pulse_indices, dtype=np.int32)
             g.create_dataset('amplitude', data=amp_all, dtype=np.float64)
-            g.create_dataset('idx_in_window', data=idx_in_window, dtype=np.int16)
+            g.create_dataset('idx_in_window', data=idx_in_window, dtype=np.int32)
 
             g.create_dataset('good_detection', data=good_detection, dtype=np.bool_)
             g.create_dataset('noise_level_amp', data=noise_level_amp, dtype=np.float64)
@@ -179,5 +227,15 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
         f.close()
 
 if __name__ == '__main__':
-    for idx, dataset in enumerate(datasets):
-        process_dataset(sphere, dataset, types[idx], data_prefixs[idx], nfiles[idx], idx_start=0)
+    import sys
+    # Optionally filter to specific gas types:
+    #   python process_gas_data.py xenon sf6
+    # Run all gas types if no argument is given.
+    gas_filter = set(sys.argv[1:]) if len(sys.argv) > 1 else set(datasets_config)
+
+    for gas_type, entries in datasets_config.items():
+        if gas_type not in gas_filter:
+            continue
+        for dataset, data_type, file_prefix, nfiles in entries:
+            print(f'\n[{gas_type}] {dataset}')
+            process_dataset(sphere, dataset, data_type, file_prefix, nfiles, idx_start=0)
