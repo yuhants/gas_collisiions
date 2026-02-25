@@ -29,8 +29,10 @@ search_window_length   = 2**8
 lb                     = 2 * search_window_length
 
 # Double-count removal parameters
-doublecount_amp_thr_kev = 500  # only check pulses above this amplitude (keV)
-doublecount_idx_thr     = 7    # max absolute-index separation to call a double count
+doublecount_amp_thr_kev          = 0   # min amplitude for same-peak pairs (keV)
+doublecount_opp_sign_amp_thr_kev = 180  # min amplitude for opposite-sign peak+trough pairs (keV)
+doublecount_idx_thr              = 25  # max index separation for same-peak pairs
+doublecount_opp_sign_idx_thr     = search_window_length // 3  # max index separation for opposite-sign pairs
 
 # Calibration-pulse identification parameters
 cal_pulse_amp_thr_kev = 700   # applied impulses are ~1100 keV/c; flag above this threshold
@@ -123,19 +125,27 @@ def read_recon_all(dataset, data_type, file_prefix, nfiles):
 
 def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
                             amp_thr_kev=doublecount_amp_thr_kev,
-                            double_count_idx_thr=doublecount_idx_thr):
+                            opp_sign_amp_thr_kev=doublecount_opp_sign_amp_thr_kev,
+                            double_count_idx_thr=doublecount_idx_thr,
+                            opp_sign_idx_thr=doublecount_opp_sign_idx_thr):
     """
     Identify and null out double-counted pulses.
 
-    A double count occurs when the same physical collision is found as the
-    peak amplitude in two adjacent search sub-windows (i.e. the pulse peak
-    sits near the boundary between them).  Such pairs have nearly identical
-    absolute sample positions and typically opposite signs in the reconstructed
-    force amplitude (one window sees the peak, the adjacent window's argmax
-    lands on the ring-down trough).
+    Two cases are handled, each with its own amplitude and index thresholds:
 
-    The smaller of each double-counted pair is set to NaN in the returned
-    array; the larger detection is kept.
+    1. Same-peak straddling (idx separation < double_count_idx_thr,
+       both amplitudes > amp_thr_kev):
+       The pulse peak sits near a sub-window boundary so both adjacent windows
+       find the same peak.  Indices are nearly identical (< ~25 samples).
+
+    2. Peak + ring-down trough (opposite sign, idx separation < opp_sign_idx_thr,
+       both amplitudes > opp_sign_amp_thr_kev):
+       One sub-window captures the positive peak of a pulse; a nearby sub-window
+       captures the negative ring-down trough of the same pulse.  The trough
+       typically appears ~T/2 after the peak (≈50 samples at 50 kHz / 5 MHz).
+
+    In both cases the smaller-|amplitude| detection is set to NaN; the larger
+    is kept.
 
     Parameters
     ----------
@@ -144,13 +154,15 @@ def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
     good_det_noise : (n_windows,) bool array
         True for windows passing quality and noise cuts.
     idx_in_window : (n_windows, n_searches) int array
-        Absolute sample index of each peak within its analysis window,
-        as stored by process_gas_data.py (dtype int32).
+        Absolute sample index of each peak within its analysis window.
     amp_thr_kev : float
-        Only check pulses above this amplitude for double counts.
+        Min amplitude (keV/c) for same-peak straddling pairs.
+    opp_sign_amp_thr_kev : float
+        Min amplitude (keV/c) for opposite-sign peak+trough pairs.
     double_count_idx_thr : int
-        Two large pulses whose absolute indices differ by less than this
-        value are considered a double count (default 7 samples ≈ 1.4 µs).
+        Max index separation for same-peak straddling pairs.
+    opp_sign_idx_thr : int
+        Max index separation for opposite-sign peak+trough pairs.
 
     Returns
     -------
@@ -160,36 +172,49 @@ def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
     ret = np.array(amplitude, dtype=np.float64)
     n_searches = amplitude.shape[1]
 
-    # Large pulses in windows that pass quality cuts
+    # Include any pulse that could qualify under either condition
+    min_amp_thr = min(amp_thr_kev, opp_sign_amp_thr_kev)
     large_pulses = (
-        (np.abs(ret) * amp2kev > amp_thr_kev)
+        (np.abs(ret) * amp2kev > min_amp_thr)
         & np.tile(good_det_noise[:, np.newaxis], (1, n_searches))
     )
 
-    abs_idx_large = idx_in_window[large_pulses].astype(np.int64)
-    # append a sentinel so the last element always has a large diff
-    small_diff = np.abs(np.diff(abs_idx_large, append=analysis_window_length)) < double_count_idx_thr
+    abs_idx_large    = idx_in_window[large_pulses].astype(np.int64)
+    idx_sep          = np.abs(np.diff(abs_idx_large, append=analysis_window_length))
+    large_pulses_pos = np.argwhere(large_pulses)   # shape (N, 2)
+    amplitude_large  = ret[large_pulses]            # 1-D view of the selected values
 
-    large_pulses_pos = np.argwhere(large_pulses)  # shape (N, 2)
-    amplitude_large  = ret[large_pulses]           # 1-D view of the selected values
+    # Case 1: any-sign pair with small index separation
+    same_peak = idx_sep < double_count_idx_thr
+
+    # Case 2: opposite-sign pair within opp_sign_idx_thr (peak + ring-down trough)
+    signs       = np.sign(amplitude_large)
+    opp_sign    = np.append(signs[:-1] != signs[1:], False)
+    peak_trough = opp_sign & (idx_sep < opp_sign_idx_thr)
 
     for i in range(len(large_pulses_pos) - 1):
-        if not small_diff[i]:
-            continue
         if np.isnan(amplitude_large[i]):
             continue
 
-        # Same physical pulse → expect opposite signs (one peak, one trough).
-        # If the product is > 1 both detections have the same sign, so they
-        # are likely two distinct pulses — leave them both.
-        if amplitude_large[i] * amplitude_large[i + 1] > 1:
+        # Skip pairs that span different analysis windows (cross-window false positive)
+        if large_pulses_pos[i][0] != large_pulses_pos[i + 1][0]:
             continue
 
-        # Null out the smaller-amplitude detection
+        # Check each condition with its own amplitude threshold
+        min_pair_amp_kev = min(abs(amplitude_large[i]), abs(amplitude_large[i + 1])) * amp2kev
+        sp = same_peak[i]   and (min_pair_amp_kev > amp_thr_kev)
+        pt = peak_trough[i] and (min_pair_amp_kev > opp_sign_amp_thr_kev)
+        if not sp and not pt:
+            continue
+
+        # Null out the smaller-amplitude detection; keep amplitude_large in sync
+        # so the NaN guard above works correctly for subsequent iterations.
         if np.abs(amplitude_large[i]) < np.abs(amplitude_large[i + 1]):
             ret[large_pulses_pos[i][0], large_pulses_pos[i][1]] = np.nan
+            amplitude_large[i] = np.nan
         else:
             ret[large_pulses_pos[i + 1][0], large_pulses_pos[i + 1][1]] = np.nan
+            amplitude_large[i + 1] = np.nan
 
     return ret
 
@@ -316,9 +341,11 @@ if __name__ == '__main__':
         for gas_type, entries in datasets_config.items():
             grp = g.create_group(gas_type)
             for dataset, data_type, file_prefix, nfiles in entries:
+
                 print(f'  {gas_type}/{dataset} ({nfiles} files)...')
                 recon = read_recon_all(dataset, data_type, file_prefix, nfiles)
-                _, hh, hh_nocal = get_summed_histogram(recon, hist_bins)
+                _, hh, hh_nocal = get_summed_histogram(recon, hist_bins, remove_doublecounts=True)
+
                 unit = f'count/{hist_bins[1]-hist_bins[0]:.0f}keV'
                 p = mean_pressure(recon)
 
