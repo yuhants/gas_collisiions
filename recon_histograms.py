@@ -270,7 +270,7 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
     return (timing_match & amp_match).reshape(idx_in_window.shape)
 
 
-def get_summed_histogram(recon_output, bins, remove_doublecounts=False):
+def get_summed_histogram(recon_output, bins, remove_doublecounts=True):
     """
     Build summed amplitude histograms over all files in recon_output.
 
@@ -288,6 +288,7 @@ def get_summed_histogram(recon_output, bins, remove_doublecounts=False):
     hh_all   = np.zeros_like(bc, dtype=np.int64)
     hh_nocal = np.zeros_like(bc, dtype=np.int64)
 
+    # Looping over all files in each dataset and perform data selection
     for i in range(len(good_detection_all)):
         noise_ok = noise_level_all[i] * amp2kev < noise_threshold_kev
         norm_drive = (

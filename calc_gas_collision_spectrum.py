@@ -90,6 +90,9 @@ def dgamma_dp_tot_noneq(pp_kev, mg_amu, p_mbar, alpha, T_gas=293, T_sensor=900, 
     return (1 - alpha) * rate_specular + alpha * rate_diffuse_noneq
 
 def get_drdqz(qq, drdq):
+    """
+    Project the calculated rate `drdq` to the z-axis
+    """
     drdq_iso = drdq / (4 * np.pi * qq**2)
 
     ret = np.empty_like(qq)
