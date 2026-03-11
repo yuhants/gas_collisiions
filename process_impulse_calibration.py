@@ -29,13 +29,16 @@ voltages = [2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]
 
 data_folder = rf'/Volumes/LaCie/gas_collisions/pulse_calibration/{sphere}/{dataset}'
 
-out_dir = r'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration'
+out_dir = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}'
 outfile = f'{dataset}_processed.hdf5'
+
+sphere_radius = 50e-9
+m_sogere = 2000 * (sphere_radius**3) * (4 / 3) * np.pi  # sphere mass
 
 ## Analysis settings
 # bandpass_lb, bandpass_ub = (35000, 70000) # Analysis bandwidth in Hz (Sphere 20251212)
 # bandpass_lb, bandpass_ub = (39000, 74000) # Analysis bandwidth in Hz (Sphere 20260105)
-bandpass_lb, bandpass_ub = (38000, 75000) # Analysis bandwidth in Hz (Sphere 20260215)
+bandpass_lb, bandpass_ub = (37000, 75000) # Analysis bandwidth in Hz (Sphere 20260215)
 
 lowpass_order = 3
 positive_pulse = True
@@ -89,6 +92,8 @@ if __name__ == '__main__':
 
             zz_pulses, pulse_shapes, amps, pulse_indices_in_win = [], [], [], []
             fs_res, drive_areas = [], []
+            sv_imps, voigt_params, sv_zs = [], [], []
+            ffz_saved = None
 
             if v == 2.5:
                 amps_noise, amps_noise_search = [], []
@@ -102,13 +107,36 @@ if __name__ == '__main__':
                 # First loosely bandpass the z signal
                 zz_bp = utils.bandpass_filtered(zz_notched, fs, bandpass_lb, bandpass_ub, order=lowpass_order)
                 
+                # c_imp = None
+
+                # `utils.get_sv_imp()` does the following:
+                #  - calculate the psd using welch
+                #  - fit a voigt profile to the observed displacement noise
+                #  - derive imprecision noise floor (in units of V^2/Hz)
+                # gamma/2 is the corresponding Lorentzian linewidth if the oscillator
+                # has damping rate gamma
+                p_fit, sv_imp, ffz, sv_z = utils.get_sv_imp(fs, zz, fit_band=(44000, 60000), noise_band=(110000, 120000),
+                                                            nperseg=2**19, p0=[5e-3, 48381*2*np.pi, 100*2*np.pi, 1*2*np.pi])
+                A, omega0, sigma, gamma_voigt = p_fit
+                gamma_damping = gamma_voigt * 2
+
+                sv_imps.append(sv_imp)
+                voigt_params.append(p_fit)
+                sv_zs.append(sv_z)
+                if ffz_saved is None:
+                    ffz_saved = ffz
+
+                # Normalize the imprecision noise to chi2 * m
+                # this will be used as the noise floor for impulse reconstruction
+                c_imp = (np.pi / (omega0**2 * gamma_damping)) * sv_imp / (A)
+
                 # Extract the pulse position
                 trigger_level = 0.5 * positive_pulse
                 pulse_indices = utils.get_pulse_idx(dd, trigger_level, positive_pulse)
                 noise_indices = np.ceil(0.5 * (pulse_indices[:-1] + pulse_indices[1:])).astype(np.int64)
 
                 for pulse_idx in pulse_indices:
-                    window, f, f_lp, amp = utils.recon_pulse(pulse_idx, dtt, zz_bp, dd, 
+                    window, f, f_lp, amp = utils.recon_pulse(pulse_idx, dtt, zz_bp, dd, c_imp, gamma_damping,
                                                              analysis_window_length, 
                                                              fit_window_length, search_window_length, 20, bandpass_ub, lowpass_order)
                     if window is None:
@@ -133,7 +161,7 @@ if __name__ == '__main__':
         
                 if v == 2.5:
                     for noise_idx in noise_indices:
-                        window, f, f_lp, amp = utils.recon_pulse(noise_idx, dtt, zz_bp, dd, 
+                        window, f, f_lp, amp = utils.recon_pulse(noise_idx, dtt, zz_bp, dd, c_imp, gamma_damping,
                                                                  analysis_window_length, 
                                                                  fit_window_length, search_window_length, 20, bandpass_ub, lowpass_order)
                         if window is None:
@@ -149,6 +177,11 @@ if __name__ == '__main__':
             g.create_dataset(f'z_signal_{v}v', data=np.asarray(zz_pulses), dtype=np.float64)
             g.create_dataset(f'drive_area_{v}v', data=np.asarray(drive_areas), dtype=np.float64)
             g.create_dataset(f'f_res_{v}v', data=np.asarray(fs_res), dtype=np.float64)
+            g.create_dataset(f'sv_imp_{v}v', data=np.asarray(sv_imps), dtype=np.float64)
+            g.create_dataset(f'voigt_params_{v}v', data=np.asarray(voigt_params), dtype=np.float64)
+            g.create_dataset(f'sv_z_{v}v', data=np.asarray(sv_zs), dtype=np.float64)
+            if v == voltages[0] and ffz_saved is not None:
+                g.create_dataset('ffz', data=ffz_saved, dtype=np.float64)
 
             if v == 2.5:
                 g.create_dataset(f'amplitudes_noise_{v}v', data=np.asarray(amps_noise), dtype=np.float64)

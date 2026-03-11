@@ -155,6 +155,7 @@ def get_c_mv(data_files_ordered, vp2p, omegad, passband, searchband=(25000, 4000
     return c_mvs
 
 def voigt(xx, A, x0, sigma, gamma):
+    # Note that scipy.special.voigt_profile is already normalized
     return A * voigt_profile(xx-x0, sigma, gamma)
 
 def fit_sigma_voigt(ff, sz, fit_band=(28000, 33000), gamma=None, p0=None):
@@ -163,8 +164,10 @@ def fit_sigma_voigt(ff, sz, fit_band=(28000, 33000), gamma=None, p0=None):
 
     fit_idx_voigt = np.logical_and(ff > fit_band[0], ff < fit_band[1])
 
-    popt, pcov = curve_fit(lambda xx, A, f0, sigma, gamma: voigt(xx, A, f0, sigma, gamma), ff[fit_idx_voigt]*2*np.pi, sz[fit_idx_voigt], 
-                           p0=p0, sigma=sz[fit_idx_voigt], maxfev=50000)
+    bounds = ([0, fit_band[0]*2*np.pi, 0, 0],
+              [np.inf, fit_band[1]*2*np.pi, np.inf, np.inf])
+    popt, pcov = curve_fit(lambda xx, A, f0, sigma, gamma: voigt(xx, A, f0, sigma, gamma), ff[fit_idx_voigt]*2*np.pi, sz[fit_idx_voigt],
+                           p0=p0, sigma=sz[fit_idx_voigt], bounds=bounds, maxfev=50000)
     # print(popt)
 
     # If don't want to fit for gamma
@@ -261,20 +264,96 @@ def get_prepulse_window(tt, pulse_idx, length):
     
     return window
 
+def get_sv_imp(fs, zz, fit_band=(44000, 60000), noise_band=(110000, 120000),
+              nperseg=2**19, p0=None):
+    """Estimate the imprecision noise floor sv_imp for the optimal filter reconstruction.
+
+    Computes the Welch PSD of the raw z signal, fits a Voigt profile to the
+    resonance peak to extract omega0, then computes:
+
+        c_imp = pi / (2 * snr * omega0^2 * fixed_gamma * bw)
+
+    This places c_imp at a fixed fraction of |chi(omega0)|^2
+    (where chi = 1/(omega0^2 - omega^2 - i*gamma*omega), no mass prefactor),
+    determined by the SNR of the resonance above the imprecision noise floor.
+    Since the filter and the PSD both operate in voltage units, c_mv cancels
+    out of the SNR and need not be provided.
+
+    Parameters
+    ----------
+    fs : int
+        Sampling rate in Hz.
+    zz : array_like
+        Raw (or notch-filtered) z signal in V.
+    fit_band : tuple of float
+        (f_low, f_high) in Hz for the Voigt fit around the resonance.
+        Default (40000, 70000) covers typical sphere resonances.
+    noise_band : tuple of float
+        (f_low, f_high) in Hz of an off-resonance region to measure the
+        imprecision floor. Should be above the resonance but below the notch.
+        Ignored if fixed_snr is provided.
+    nperseg : int
+        Welch segment length. Default 2**17.
+    bw : float
+        Reference bandwidth in Hz over which the SNR is defined.
+        Default 20 kHz (matches Clarke's fixed_imprecision default).
+    fixed_snr : float or None
+        If given, skip the noise measurement and use this SNR directly.
+        Pass 1e6 for Clarke's default 60 dB hardcoded value.
+    fixed_gamma : float
+        Damping rate in rad/s used in the formula. Clarke fixes this at 4 rad/s
+        to avoid amplifying variance from the fit.
+    p0 : array_like or None
+        Initial parameters for the Voigt fit [A, f0_rad, sigma_rad, gamma_rad].
+        Passed through to fit_sigma_voigt.
+
+    Returns
+    -------
+    c_imp : float
+        Imprecision noise floor in units of |chi|^2.
+    snr : float
+        SNR used (measured or fixed), for diagnostics.
+    """
+    ff, pp = welch(zz, fs=fs, nperseg=nperseg)
+    A, omega0, sigma, gamma_voigt = fit_sigma_voigt(ff, pp, fit_band=fit_band, p0=p0)
+
+    _idx = np.logical_and(ff>noise_band[0], ff<noise_band[1])
+    sv_imp = np.mean(pp[_idx])
+
+    # if fixed_snr is not None:
+    #     snr = fixed_snr
+    # else:
+    #     pp_peak = np.max(voigt(ff * 2 * np.pi, A, omega0, sigma, gamma_voigt))
+    #     noise_idx = np.logical_and(ff > noise_band[0], ff < noise_band[1])
+    #     noise_floor = np.median(pp[noise_idx])
+    #     snr = pp_peak / noise_floor
+
+    # c_imp = np.pi / (2 * snr * omega0**2 * fixed_gamma * bw)
+    return [A, omega0, sigma, gamma_voigt], sv_imp, ff, pp
+
 def get_susceptibility(omega, omega0, gamma):
+    """Functional form of susceptibility of an harmonic oscillator, normalized
+    to mass=1"""
     ## Note that this is *not* how susceptibility is usually
     ## defined.
     ## DO NOT use this function for other calculations
     chi = 1 / (omega0**2 - omega**2 - 1j*gamma*omega)
     return chi
 
-def get_pulse_amp(dt, zz, omega0, gamma):
+def get_pulse_amp(dt, zz, omega0, gamma, c_imp=None):
     zzk = rfft(zz)
     ff = rfftfreq(zz.size, dt)
     omega = ff * 2 * np.pi
 
     chi_omega = get_susceptibility(omega, omega0, gamma)
-    filter_output = irfft(zzk / chi_omega)
+    # If no imprecision noise floor is provided
+    # use simple 1/chi as the optimal filter
+    if c_imp is None:
+        filter_output = irfft(zzk / chi_omega)
+    else:
+        # Noise model for the optimal filter
+        j_noise = np.abs(chi_omega)**2 + c_imp
+        filter_output = irfft(zzk * np.conj(chi_omega) / j_noise)
 
     return filter_output
 
@@ -291,12 +370,14 @@ def get_search_window(amp, pulse_idx_in_window, search_window_length, pulse_leng
     return search_window
 
 def recon_pulse(idx, dtt, zz_bp, dd,
+                c_imp=None,
+                gamma_damping=None,
                 analysis_window_length=100000,
                 prepulse_window_length=5000,
                 search_window_length=20,
                 pulse_length=20,
                 lowpass_freq=60000,
-                lowpass_order=2):
+                lowpass_order=3):
 
     if idx < prepulse_window_length:
         print('Skipping pulse too close to the beginning of the file')
@@ -313,14 +394,16 @@ def recon_pulse(idx, dtt, zz_bp, dd,
     ff = rfftfreq(zz_bp[prepulse_window].size, dtt)
     pp = np.abs(zzk)**2 / (zz_bp[prepulse_window].size / dtt)
 
-    # Now just take the fft frequency
+    # Now just take the max fft frequency as the resonant frequency
     omega0_guess = ff[np.argmax(pp)] * 2 * np.pi
     omega0_fit = omega0_guess
 
     # Use a fixed damping to reconstruct pulse amp
     # Actual damping doesn't matter as long as gamma << omega0
-    # At some poing we've started using the frequency resolution set by FFT (20250210)
-    amp = get_pulse_amp(dtt, zz_bp[window], omega0_fit, (ff[1]-ff[0])*2*np.pi)
+    # If damping is not provided, use the frequency resolution set by FFT
+    if gamma_damping is None:
+        gamma_damping = 2 * np.pi * (ff[1]-ff[0])
+    amp = get_pulse_amp(dtt, zz_bp[window], omega0_fit, gamma_damping, c_imp)
 
     # Low pass the reconstructed amplitude to reject high frequency noise
     amp_lp = lowpass_filtered(amp, fs, lowpass_freq, lowpass_order)
@@ -345,9 +428,9 @@ def fit_amps_gaus(normalized_amps, bins=None, noise=False, return_bins=False):
         bc = 0.5 * (be[1:] + be[:-1])
         
         if noise:
-            gp, gcov = curve_fit(gauss_zero, bc, hh, p0=[np.max(hh), np.std(np.abs(amp))], maxfev=100000)
+            gp, gcov = curve_fit(gauss_zero, bc, hh, p0=[np.max(hh), np.std(np.abs(amp))], bounds=([1e-10, np.inf]), maxfev=100000)
         else:
-            gp, gcov = curve_fit(gauss, bc, hh, p0=[np.max(hh), np.mean(np.abs(amp)), np.std(np.abs(amp))], maxfev=50000)
+            gp, gcov = curve_fit(gauss, bc, hh, p0=[np.max(hh), np.mean(np.abs(amp)), np.std(np.abs(amp))], bounds=([1e-10, np.inf]), maxfev=50000)
 
         hhs.append(hh)
         bcs.append(bc)
