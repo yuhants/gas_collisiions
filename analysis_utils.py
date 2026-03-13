@@ -158,14 +158,23 @@ def voigt(xx, A, x0, sigma, gamma):
     # Note that scipy.special.voigt_profile is already normalized
     return A * voigt_profile(xx-x0, sigma, gamma)
 
-def fit_sigma_voigt(ff, sz, fit_band=(28000, 33000), gamma=None, p0=None):
+def fit_sigma_voigt(ff, sz, fit_band=(28000, 33000), gamma=None, p0=None, peak_half_width=1000):
     if p0 is None:
         p0 = [7e-18, 46147*2*np.pi, 50*2*np.pi, 5*2*np.pi]
 
-    fit_idx_voigt = np.logical_and(ff > fit_band[0], ff < fit_band[1])
+    # Detect peak in the broad fit_band, then restrict fit to a narrow window
+    # around it so the peak bins dominate the sigma=sz weighted chi-squared
+    coarse_idx = np.logical_and(ff > fit_band[0], ff < fit_band[1])
+    peak_freq = ff[coarse_idx][np.argmax(sz[coarse_idx])]
+    fit_idx_voigt = np.logical_and(ff > peak_freq - peak_half_width,
+                                   ff < peak_freq + peak_half_width)
+
+    # Use detected peak as initial frequency guess
+    p0 = list(p0)
+    p0[1] = peak_freq * 2 * np.pi
 
     bounds = ([0, fit_band[0]*2*np.pi, 0, 0],
-              [np.inf, fit_band[1]*2*np.pi, np.inf, np.inf])
+              [np.inf, fit_band[1]*2*np.pi, peak_half_width*2*np.pi, peak_half_width*2*np.pi])
     popt, pcov = curve_fit(lambda xx, A, f0, sigma, gamma: voigt(xx, A, f0, sigma, gamma), ff[fit_idx_voigt]*2*np.pi, sz[fit_idx_voigt],
                            p0=p0, sigma=sz[fit_idx_voigt], bounds=bounds, maxfev=50000)
     # print(popt)
@@ -266,18 +275,18 @@ def get_prepulse_window(tt, pulse_idx, length):
 
 def get_sv_imp(fs, zz, fit_band=(44000, 60000), noise_band=(110000, 120000),
               nperseg=2**19, p0=None):
-    """Estimate the imprecision noise floor sv_imp for the optimal filter reconstruction.
+    """Compute the Welch PSD of the z signal and fit the resonance peak.
 
-    Computes the Welch PSD of the raw z signal, fits a Voigt profile to the
-    resonance peak to extract omega0, then computes:
+    Fits a Voigt profile to the resonance peak within fit_band to extract
+    omega0, sigma, and gamma. Also measures the imprecision noise floor sv_imp
+    as the mean PSD in noise_band (an off-resonance region above the peak but
+    below the notch).
 
-        c_imp = pi / (2 * snr * omega0^2 * fixed_gamma * bw)
+    The caller is responsible for deriving c_imp from the returned parameters.
+    In process_impulse_calibration.py this is done as:
 
-    This places c_imp at a fixed fraction of |chi(omega0)|^2
-    (where chi = 1/(omega0^2 - omega^2 - i*gamma*omega), no mass prefactor),
-    determined by the SNR of the resonance above the imprecision noise floor.
-    Since the filter and the PSD both operate in voltage units, c_mv cancels
-    out of the SNR and need not be provided.
+        gamma_damping = gamma_voigt * 2
+        c_imp = (pi / (omega0^2 * gamma_damping)) * sv_imp / A
 
     Parameters
     ----------
@@ -286,33 +295,28 @@ def get_sv_imp(fs, zz, fit_band=(44000, 60000), noise_band=(110000, 120000),
     zz : array_like
         Raw (or notch-filtered) z signal in V.
     fit_band : tuple of float
-        (f_low, f_high) in Hz for the Voigt fit around the resonance.
-        Default (40000, 70000) covers typical sphere resonances.
+        (f_low, f_high) in Hz. The peak is detected by argmax within this band,
+        then the Voigt is fit over a narrow window around it (see fit_sigma_voigt).
     noise_band : tuple of float
-        (f_low, f_high) in Hz of an off-resonance region to measure the
-        imprecision floor. Should be above the resonance but below the notch.
-        Ignored if fixed_snr is provided.
+        (f_low, f_high) in Hz of an off-resonance region used to measure sv_imp.
+        Should be above the resonance but below the notch frequency.
     nperseg : int
-        Welch segment length. Default 2**17.
-    bw : float
-        Reference bandwidth in Hz over which the SNR is defined.
-        Default 20 kHz (matches Clarke's fixed_imprecision default).
-    fixed_snr : float or None
-        If given, skip the noise measurement and use this SNR directly.
-        Pass 1e6 for Clarke's default 60 dB hardcoded value.
-    fixed_gamma : float
-        Damping rate in rad/s used in the formula. Clarke fixes this at 4 rad/s
-        to avoid amplifying variance from the fit.
+        Welch segment length. Default 2**19 gives ~9.5 Hz resolution at 5 MHz.
     p0 : array_like or None
-        Initial parameters for the Voigt fit [A, f0_rad, sigma_rad, gamma_rad].
-        Passed through to fit_sigma_voigt.
+        Initial parameters [A, omega0_rad, sigma_rad, gamma_rad] for the Voigt
+        fit. The f0 component is overridden by the detected peak frequency.
 
     Returns
     -------
-    c_imp : float
-        Imprecision noise floor in units of |chi|^2.
-    snr : float
-        SNR used (measured or fixed), for diagnostics.
+    p_fit : list of float
+        Voigt fit parameters [A, omega0, sigma, gamma] in SI units
+        (A in V²/Hz·rad, omega0/sigma/gamma in rad/s).
+    sv_imp : float
+        Mean PSD in noise_band (V²/Hz), used as the imprecision noise floor.
+    ff : ndarray
+        Frequency array from Welch (Hz).
+    pp : ndarray
+        PSD array from Welch (V²/Hz).
     """
     ff, pp = welch(zz, fs=fs, nperseg=nperseg)
     A, omega0, sigma, gamma_voigt = fit_sigma_voigt(ff, pp, fit_band=fit_band, p0=p0)
