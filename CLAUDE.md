@@ -52,12 +52,28 @@ Raw data lives on an external drive (`/Volumes/LaCie/`). Processed data is commi
 - `smear_drdqz_gauss()` — Convolves theory spectrum with Gaussian detector resolution
 - `get_drdqz()` — Converts momentum transfer → detectable recoil energy
 
-**`process_gas_data.py`** — Batch-processes raw xenon/background runs:
-- Applies notch filter (137 kHz drive tone removal), bandpass (sphere-specific, e.g. 39–74 kHz)
-- Reconstructs impulse amplitudes from force time-series using susceptibility inversion
-- Outputs per-window quality flags (`good_detection`), amplitudes, chi-squared, noise levels
+**`process_gas_data.py`** — Batch-processes raw xenon/background/krypton/SF6 runs:
+- Two modes: sliding-window (`process_dataset`) and cal-mode (`process_dataset_cal_mode --cal`)
+- Cal-mode triggers on cal pulses in gas runs, outputs `{dataset}_cal_processed.hdf5` with per-pulse arrays
+- Fixed-parameter overrides: `fixed_gamma_damping`, `fixed_c_imp` bypass Voigt fit entirely
+- `SCAN_C_IMP`: scans c_imp_scaling on pilot files; skipped when `fixed_c_imp` is set
+- HDF5 attrs: `fixed_c_imp` OR `c_imp_scaling` (mutually exclusive), optionally `fixed_gamma_damping`
+- chi2 convention: `sum(((waveform - amp*T_norm) / sigma_amp)^2)`, `sigma_amp = 60keV / amp2kev`, window = 500 samples (±250 around peak)
 
-**`process_impulse_calibration.py`** — Processes known-force calibration shots at multiple drive voltages (2.5V–20V), building a calibration HDF5 with pulse shapes, amplitudes, and resonant frequencies.
+**`process_impulse_calibration.py`** — Processes known-force calibration shots at 2.5V–20V:
+- Fixed-parameter overrides: `fixed_gamma_damping`, `fixed_c_imp` (same convention as process_gas_data.py)
+- At 2.5V, also reconstructs noise-only windows (midpoints between cal pulses) and saves:
+  - `noise_waveforms_2.5v` — waveform centred at geometric midpoint (no search)
+  - `noise_waveforms_search_2.5v` — waveform centred at searched peak (consistent with signal pulses)
+  - `noise_drive_area_2.5v`, `noise_f_res_2.5v`, `noise_noise_level_2.5v` — diagnostics for quality cuts
+- All noise arrays are aligned (same entries); if either waveform slice is out-of-bounds, the whole noise index is skipped
+
+**`recon_histograms.py`** — Builds amplitude histograms from sliding-window processed output:
+- `get_summed_histogram()` returns `(bc, hh_all, hh_nocal, hh_cal)` — 4 values
+- Quality cuts: `noise_threshold_kev=70`, `chi2_threshold=700`, `normalized_drive_power_threshold=4.5e-9`
+- Double-count removal: same-peak straddling and peak+ring-down trough cases
+- `flag_cal_pulses()`: timing window `[pulse_index+20, pulse_index+276)`, amp threshold 700 keV/c
+- Output HDF5 has `{dataset}`, `{dataset}_nocal`, `{dataset}_cal` datasets per gas type group
 
 **`gas_likelihood_fit.py`** — Likelihood optimization:
 - `calc_nll()` — Negative log-likelihood comparing data histogram to theory + background model
@@ -68,43 +84,104 @@ Raw data lives on an external drive (`/Volumes/LaCie/`). Processed data is commi
 
 ### Sphere-specific configuration (edit in scripts per sphere)
 ```python
-bandpass_lb, bandpass_ub = (39000, 74000)  # Hz — sphere_20260105
+# sphere_20260215 (current active sphere, after introducing imprecision):
+bandpass_lb, bandpass_ub = (35000, 80000)   # Hz
 notch_freq = 137000                          # Hz
-sigma_p_amp = 60 / amp2kev_factor           # Amplitude noise (keV)
+fixed_gamma_damping = 1 * 2 * np.pi         # rad/s
+fixed_c_imp = 1.5e-22                        # raw units
+amp2kev = 14460.84503586                     # keV/c per raw unit
+
+# sphere_20260105:
+bandpass_lb, bandpass_ub = (39000, 74000)
+amp2kev = 6792.86
+
+# sigma_amp for chi2:
+sigma_amp = 60 / amp2kev                     # 60 keV/c noise assumption
 ```
 
 ### Dataset naming
 - Datasets: `YYYYMMDD_p{N_elements}e_{pressure}mbar[_tag]` — e.g., `20260107_p8e_4e-8mbar`
 - Spheres: `sphere_YYYYMMDD` (creation date)
-- Processed files: `{dataset}_processed.hdf5`
+- Processed files (sliding-window): `{dataset}/{file_prefix}{i}_processed.hdf5`
+- Processed files (cal-mode): `{dataset}/{dataset}_cal_processed.hdf5`
+- Calibration processed: `pulse_calibration/{sphere}/{dataset}_processed.hdf5`
 
-### HDF5 structure (processed output)
+### HDF5 structure — sliding-window output (`process_gas_data.py`)
 ```
-/amplitude          (n_windows, n_searches)  float64
-/idx_in_window      (n_windows, n_searches)  int16
-/good_detection     (n_windows,)             bool
-/noise_level_amp    (n_windows,)             float64
-/f_res              (n_windows,)             float64
-/driven_power       (n_windows,)             float64
-/chisquare          (n_windows, n_searches)  float64
-attrs: pressure_mbar, timestamp
+data_processed/
+  amplitude          (n_windows, n_searches)  float64
+  idx_in_window      (n_windows, n_searches)  int32
+  good_detection     (n_windows,)             bool
+  noise_level_amp    (n_windows,)             float64
+  f_res              (n_windows,)             float64
+  driven_power       (n_windows,)             float64
+  chisquare          (n_windows, n_searches)  float64
+  cal_pulse_indices  (n_cal,)                 int32
+  attrs: pressure_mbar, amp2kev, fixed_c_imp | c_imp_scaling, [fixed_gamma_damping]
+```
+
+### HDF5 structure — cal-mode output (`process_gas_data.py --cal`)
+```
+data_processed/
+  amplitude          (N,)        float64
+  waveform           (N, 3000)   float64
+  noise_level_amp    (N,)        float64
+  driven_power       (N,)        float64
+  f_res              (N,)        float64
+  idx_in_window      (N,)        int32
+  file_index         (N,)        int32
+  pulse_abs_index    (N,)        int32
+  attrs: fixed_c_imp | c_imp_scaling, [fixed_gamma_damping]
+```
+
+### HDF5 structure — impulse calibration output (`process_impulse_calibration.py`)
+```
+data_processed/
+  amplitudes_{v}v              (N,)       float64   # per voltage
+  pulse_shapes_{v}v            (N, 3000)  float64
+  noise_level_{v}v             (N,)       float64
+  drive_area_{v}v              (N,)       float64
+  f_res_{v}v                   (N,)       float64
+  pulse_indices_in_win_{v}v    (N,)       int32
+  z_signal_{v}v                (N, 3000)  float64
+  # 2.5V only:
+  amplitudes_noise_2.5v        (M,)       float64   # amplitude at midpoint (no search)
+  amplitudes_noise_search_2.5v (M,)       float64   # searched peak amplitude
+  noise_waveforms_2.5v         (M, 3000)  float64   # waveform at midpoint
+  noise_waveforms_search_2.5v  (M, 3000)  float64   # waveform at searched peak
+  noise_drive_area_2.5v        (M,)       float64
+  noise_f_res_2.5v             (M,)       float64
+  noise_noise_level_2.5v       (M,)       float64
+  attrs: fixed_c_imp | c_imp_scaling, [fixed_gamma_damping]
 ```
 
 ### Analysis window sizes
 ```python
 analysis_window_length = 2**19  # ~105 ms at 5 MHz sampling
 search_window_length   = 2**8   # ~51 µs
-prepulse_window_length = 50000  # 10 ms (for resonant frequency extraction)
+fit_window_length      = 2**19  # prepulse PSD window
+waveform_half_len      = 1500   # samples each side of peak (3000 total)
+template_half_len      = 250    # chi2 window (500 total)
 ```
 
-## Active Experiments (Feb 2026)
+### Quality cuts (sphere_20260215)
+```python
+noise_threshold_kev              = 70      # keV/c (noise_level_amp * amp2kev)
+normalized_drive_power_threshold = 4.5e-9  # drive_area * (f_res²-drive_freq²)² / (ref_freq²-drive_freq²)²
+chi2_threshold                   = 700     # total chi2 (not per-dof)
+```
 
-- **sphere_20260105**: Primary analysis target; xenon runs at 4e-8 to 2e-7 mbar
-- **sphere_20260215**: Latest sphere; pulse calibration data recently acquired
+## Active Experiments (Mar 2026)
+
+- **sphere_20260215**: Primary active sphere; xenon/krypton/SF6/background runs at multiple pressures; using `fixed_gamma_damping = 1*2π rad/s`, `fixed_c_imp = 1.5e-22`, `amp2kev = 14460.85`
+- **sphere_20260105**: Earlier sphere; xenon runs at 4e-8 to 2e-7 mbar; `amp2kev = 6792.86`
 
 ## Analysis Notebooks Location
 
 Organized by sphere under `analysis_notebooks/sphere_YYYYMMDD/`:
+- `analysis_notebooks/sphere_20260215_final_analysis/` — Active final analysis for sphere_20260215
+  - `20260320_sphere_20260215_impulse_calibration.ipynb` — Calibration + noise characterisation; chi2 diagnostics; gas dataset cal-pulse quality
+  - `20260319_sphere_20260215_cimp_scan_xe.ipynb` — c_imp scan results for xenon
 - `*_calibration.ipynb` — Voltage-to-energy calibration
 - `*_likelihood_fit.ipynb` — Main fit and results
 - `*_recon.ipynb` — Pulse reconstruction and histogram generation

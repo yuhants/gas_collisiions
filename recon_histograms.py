@@ -6,10 +6,12 @@ import h5py
 # CONFIG — edit these before running
 # ============================================================
 sphere = 'sphere_20260215'
-amp2kev = 8363.560351624732
+# amp2kev_from_cal = 8363.560351624732   # sphere_20260215
+amp2kev_from_cal = 10497.219118653622    # sphere_20260215; after introducing imprecision
 
 # Path to processed gas data
-processed_data_dir = r'/Users/yuhan/work/nanospheres/data/gas_data_processed'
+# processed_data_dir = r'/Users/yuhan/work/nanospheres/data/gas_data_processed' # directory for old noise model
+processed_data_dir = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_data_processed'
 
 # Output directory and filename
 outdir = r'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_recon'
@@ -19,8 +21,8 @@ outfile_name = f'{sphere}_gas_recon_all.h5py'
 hist_bins = np.arange(0, 2000, 25)
 
 # Quality cut parameters
-noise_threshold_kev = 70
-chi2_threshold = 700
+noise_threshold_kev = 100
+chi2_threshold = 600
 normalized_drive_power_threshold = 4.5e-9
 
 # Analysis window structure (must match process_gas_data.py)
@@ -29,13 +31,13 @@ search_window_length   = 2**8
 lb                     = 2 * search_window_length
 
 # Double-count removal parameters
-doublecount_amp_thr_kev          = 0   # min amplitude for same-peak pairs (keV)
+doublecount_amp_thr_kev          = 0    # min amplitude for same-peak pairs (keV)
 doublecount_opp_sign_amp_thr_kev = 180  # min amplitude for opposite-sign peak+trough pairs (keV)
-doublecount_idx_thr              = 25  # max index separation for same-peak pairs
+doublecount_idx_thr              = 25   # max index separation for same-peak pairs
 doublecount_opp_sign_idx_thr     = search_window_length // 3  # max index separation for opposite-sign pairs
 
 # Calibration-pulse identification parameters
-cal_pulse_amp_thr_kev = 700   # applied impulses are ~1100 keV/c; flag above this threshold
+cal_pulse_amp_thr_kev = 650   # applied impulses are ~1100 keV/c; flag above this threshold
 # Peak is expected in [pulse_index + offset, pulse_index + offset + search_window_length]
 # The +20 offset comes from get_search_window() in analysis_utils.py (pulse_length=20)
 cal_pulse_offset = 20
@@ -87,28 +89,31 @@ datasets_config = {
 
 def read_recon(file):
     with h5py.File(file, 'r') as f:
-        pressure = f['data_processed'].attrs['pressure_mbar']
-        amps           = f['data_processed']['amplitude'][:]
-        idx_in_window  = f['data_processed']['idx_in_window'][:]
-        good_detection = f['data_processed']['good_detection'][:]
-        noise_level_amp = f['data_processed']['noise_level_amp'][:]
-        chi2           = f['data_processed']['chisquare'][:]
-        f_res          = f['data_processed']['f_res'][:]
-        driven_power   = f['data_processed']['driven_power'][:]
-        pulse_indices  = f['data_processed']['pulse_indices'][:]
-    return amps, good_detection, noise_level_amp, chi2, f_res, driven_power, pressure, idx_in_window, pulse_indices
+        g              = f['data_processed']
+        pressure       = g.attrs['pressure_mbar']
+        file_amp2kev   = float(g.attrs.get('amp2kev', amp2kev_from_cal))
+        amps           = g['amplitude'][:]
+        idx_in_window  = g['idx_in_window'][:]
+        good_detection = g['good_detection'][:]
+        noise_level_amp = g['noise_level_amp'][:]
+        chi2           = g['chisquare'][:]
+        f_res          = g['f_res'][:]
+        driven_power   = g['driven_power'][:]
+        pulse_indices  = g['cal_pulse_indices'][:]
+
+    return amps, good_detection, noise_level_amp, chi2, f_res, driven_power, pressure, idx_in_window, pulse_indices, file_amp2kev
 
 
 def read_recon_all(dataset, data_type, file_prefix, nfiles):
     amps_all, good_detection_all, noise_level_all = [], [], []
-    chi2_all, driven_power_all, f_res_all, pressure_all, idx_in_window_all, pulse_indices_all = [], [], [], [], [], []
+    chi2_all, driven_power_all, f_res_all, pressure_all, idx_in_window_all, pulse_indices_all, amp2kev_all = [], [], [], [], [], [], []
 
     for i in range(nfiles):
         file = os.path.join(
             processed_data_dir, sphere, data_type, dataset,
             f'{file_prefix}{i}_processed.hdf5'
         )
-        amps, good_detection, noise_level_amp, chi2, f_res, driven_power, pressure, idx_in_window, pulse_indices = read_recon(file)
+        amps, good_detection, noise_level_amp, chi2, f_res, driven_power, pressure, idx_in_window, pulse_indices, file_amp2kev = read_recon(file)
         amps_all.append(amps)
         good_detection_all.append(good_detection)
         noise_level_all.append(noise_level_amp)
@@ -118,12 +123,14 @@ def read_recon_all(dataset, data_type, file_prefix, nfiles):
         pressure_all.append(pressure)
         idx_in_window_all.append(idx_in_window)
         pulse_indices_all.append(pulse_indices)
+        amp2kev_all.append(file_amp2kev)
 
-    # pressure_all stays at index 6 so mean_pressure() is unaffected
-    return amps_all, good_detection_all, noise_level_all, chi2_all, driven_power_all, f_res_all, pressure_all, idx_in_window_all, pulse_indices_all
+    # pressure_all stays at index 6, amp2kev_all at index 9
+    return amps_all, good_detection_all, noise_level_all, chi2_all, driven_power_all, f_res_all, pressure_all, idx_in_window_all, pulse_indices_all, amp2kev_all
 
 
 def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
+                            file_amp2kev=None,
                             amp_thr_kev=doublecount_amp_thr_kev,
                             opp_sign_amp_thr_kev=doublecount_opp_sign_amp_thr_kev,
                             double_count_idx_thr=doublecount_idx_thr,
@@ -171,11 +178,12 @@ def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
     """
     ret = np.array(amplitude, dtype=np.float64)
     n_searches = amplitude.shape[1]
+    a2k = file_amp2kev if file_amp2kev is not None else amp2kev_from_cal
 
     # Include any pulse that could qualify under either condition
     min_amp_thr = min(amp_thr_kev, opp_sign_amp_thr_kev)
     large_pulses = (
-        (np.abs(ret) * amp2kev > min_amp_thr)
+        (np.abs(ret) * a2k > min_amp_thr)
         & np.tile(good_det_noise[:, np.newaxis], (1, n_searches))
     )
 
@@ -201,7 +209,7 @@ def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
             continue
 
         # Check each condition with its own amplitude threshold
-        min_pair_amp_kev = min(abs(amplitude_large[i]), abs(amplitude_large[i + 1])) * amp2kev
+        min_pair_amp_kev = min(abs(amplitude_large[i]), abs(amplitude_large[i + 1])) * a2k
         sp = same_peak[i]   and (min_pair_amp_kev > amp_thr_kev)
         pt = peak_trough[i] and (min_pair_amp_kev > opp_sign_amp_thr_kev)
         if not sp and not pt:
@@ -220,6 +228,7 @@ def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
 
 
 def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
+                    file_amp2kev=None,
                     amp_thr_kev=cal_pulse_amp_thr_kev,
                     offset=cal_pulse_offset):
     """
@@ -266,62 +275,124 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
                      np.int64(-1))
     timing_match = (delta >= offset) & (delta < offset + search_window_length)
 
-    amp_match = np.abs(amplitude.ravel()) * amp2kev > amp_thr_kev
+    a2k = file_amp2kev if file_amp2kev is not None else amp2kev_from_cal
+    amp_match = np.abs(amplitude.ravel()) * a2k > amp_thr_kev
     return (timing_match & amp_match).reshape(idx_in_window.shape)
 
 
-def get_summed_histogram(recon_output, bins, remove_doublecounts=True):
+def get_summed_histogram(recon_output, bins, remove_doublecounts=True,
+                         apply_noise_cut=True, apply_drive_cut=True, apply_chi2_cut=True):
     """
     Build summed amplitude histograms over all files in recon_output.
+
+    Intermediate histograms are accumulated after each cumulative selection
+    stage so the effect of every cut can be inspected independently.
+    Cal-pulse flagging is done on raw amplitudes (before quality cuts) and
+    the nocal/cal split is provided at every stage.
+
+    Parameters
+    ----------
+    apply_noise_cut : bool
+        Apply noise_threshold_kev cut on noise_level_amp (default True).
+    apply_drive_cut : bool
+        Apply normalized_drive_power_threshold cut (default True).
+    apply_chi2_cut : bool
+        Null amplitudes where chi2 >= chi2_threshold (default True).
 
     Returns
     -------
     bc : bin centres (keV/c)
-    hh_all : histogram of all passing amplitudes
-    hh_nocal : histogram with calibration-pulse coincident amplitudes removed
+    histograms : dict of str → int64 array
+        Keys (cumulative selection stages):
+        'nocuts'        — no cuts at all
+        'hom_bal'       — homodyne balance (good_detection) only
+        'noise'         — + noise threshold
+        'drive'         — + drive power threshold
+        'chi2'          — + chi2 threshold
+        'all'           — + double-count removal
+        Append '_nocal' or '_cal' for the cal-pulse split at each stage.
     """
     amps_all, good_detection_all, noise_level_all, chi2_all, driven_power_all, f_res_all = recon_output[:6]
     idx_in_window_all  = recon_output[7] if len(recon_output) > 7 else None
     pulse_indices_all  = recon_output[8] if len(recon_output) > 8 else None
+    amp2kev_all        = recon_output[9] if len(recon_output) > 9 else [amp2kev_from_cal] * len(amps_all)
 
     bc = 0.5 * (bins[:-1] + bins[1:])
-    hh_all   = np.zeros_like(bc, dtype=np.int64)
-    hh_nocal = np.zeros_like(bc, dtype=np.int64)
+    stage_names = ['nocuts', 'hom_bal', 'noise', 'drive', 'chi2', 'all']
+    hh = {}
+    for s in stage_names:
+        hh[s]           = np.zeros_like(bc, dtype=np.int64)
+        hh[s + '_nocal'] = np.zeros_like(bc, dtype=np.int64)
+        hh[s + '_cal']   = np.zeros_like(bc, dtype=np.int64)
 
-    # Looping over all files in each dataset and perform data selection
-    for i in range(len(good_detection_all)):
-        noise_ok = noise_level_all[i] * amp2kev < noise_threshold_kev
-        norm_drive = (
-            driven_power_all[i]
-            * (f_res_all[i]**2 - drive_freq**2)**2
-            / (ref_freq**2 - drive_freq**2)**2
-        )
-        good_window = good_detection_all[i] & noise_ok & (norm_drive > normalized_drive_power_threshold)
+    def _hist(amps_2d, mask_1d):
+        vals = amps_2d[mask_1d].ravel()
+        vals = vals[~np.isnan(vals)]
+        h, _ = np.histogram(np.abs(vals) * a2k, bins)
+        return h
 
-        # Apply chi2 cut by nulling bad entries (keeps 2-D shape for subsequent steps)
-        amps = np.array(amps_all[i], dtype=np.float64)
-        amps[chi2_all[i] >= chi2_threshold] = np.nan
-
-        if remove_doublecounts and idx_in_window_all is not None:
-            amps = throw_away_doublecounts(amps, good_window, idx_in_window_all[i])
-
-        good_amps = amps[good_window].ravel()
-        passing_amps = good_amps[~np.isnan(good_amps)]
-        hh, _ = np.histogram(np.abs(passing_amps) * amp2kev, bins)
-        hh_all += hh
-
-        # Cal-pulse mask: flag entries that are timing-coincident AND above amplitude threshold
-        if idx_in_window_all is not None and pulse_indices_all is not None:
-            is_cal = flag_cal_pulses(idx_in_window_all[i], pulse_indices_all[i], amps)
-            amps_nocal = np.where(is_cal, np.nan, amps)
-            good_amps_nocal = amps_nocal[good_window].ravel()
-            passing_nocal = good_amps_nocal[~np.isnan(good_amps_nocal)]
-            hh_nc, _ = np.histogram(np.abs(passing_nocal) * amp2kev, bins)
-            hh_nocal += hh_nc
+    def _accumulate(stage, amps_2d, mask_1d, is_cal):
+        h = _hist(amps_2d, mask_1d)
+        hh[stage] += h
+        if is_cal is not None:
+            hh[stage + '_nocal'] += _hist(np.where(is_cal, np.nan, amps_2d), mask_1d)
+            hh[stage + '_cal']   += _hist(np.where(is_cal, amps_2d, np.nan), mask_1d)
         else:
-            hh_nocal += hh
+            hh[stage + '_nocal'] += h
 
-    return bc, hh_all, hh_nocal
+    for i in range(len(good_detection_all)):
+        a2k = amp2kev_all[i]
+        amps_raw = np.array(amps_all[i], dtype=np.float64)
+
+        # Flag cal pulses on raw amplitudes (before any cuts)
+        if idx_in_window_all is not None and pulse_indices_all is not None:
+            is_cal = flag_cal_pulses(idx_in_window_all[i], pulse_indices_all[i], amps_raw, file_amp2kev=a2k)
+        else:
+            is_cal = None
+
+        # --- Stage: nocuts ---
+        mask_all = np.ones(len(good_detection_all[i]), dtype=bool)
+        _accumulate('nocuts', amps_raw, mask_all, is_cal)
+
+        # --- Stage: hom_bal (good_detection) ---
+        mask_hom = good_detection_all[i]
+        _accumulate('hom_bal', amps_raw, mask_hom, is_cal)
+
+        # --- Stage: + noise ---
+        if apply_noise_cut:
+            noise_ok = noise_level_all[i] * a2k < noise_threshold_kev
+        else:
+            noise_ok = np.ones(len(good_detection_all[i]), dtype=bool)
+        mask_noise = mask_hom & noise_ok
+        _accumulate('noise', amps_raw, mask_noise, is_cal)
+
+        # --- Stage: + drive ---
+        if apply_drive_cut:
+            norm_drive = (
+                driven_power_all[i]
+                * (f_res_all[i]**2 - drive_freq**2)**2
+                / (ref_freq**2 - drive_freq**2)**2
+            )
+            drive_ok = norm_drive > normalized_drive_power_threshold
+        else:
+            drive_ok = np.ones(len(good_detection_all[i]), dtype=bool)
+        mask_drive = mask_noise & drive_ok
+        _accumulate('drive', amps_raw, mask_drive, is_cal)
+
+        # --- Stage: + chi2 ---
+        amps_chi2 = np.array(amps_raw)
+        if apply_chi2_cut:
+            amps_chi2[chi2_all[i] >= chi2_threshold] = np.nan
+        _accumulate('chi2', amps_chi2, mask_drive, is_cal)
+
+        # --- Stage: + double-count removal ---
+        if remove_doublecounts and idx_in_window_all is not None:
+            amps_final = throw_away_doublecounts(amps_chi2, mask_drive, idx_in_window_all[i], file_amp2kev=a2k)
+        else:
+            amps_final = amps_chi2
+        _accumulate('all', amps_final, mask_drive, is_cal)
+
+    return bc, hh
 
 
 def mean_pressure(recon_output):
@@ -329,33 +400,90 @@ def mean_pressure(recon_output):
 
 
 if __name__ == '__main__':
+    import sys
+    # Usage:
+    #   python recon_histograms.py [--no-noise-cut] [--no-drive-cut] [--no-chi2-cut] [gas_type ...]
+    #
+    # --no-noise-cut   skip noise_threshold_kev cut
+    # --no-drive-cut   skip normalized_drive_power_threshold cut
+    # --no-chi2-cut    skip chi2_threshold cut
+    # gas_type ...     restrict to one or more gas types (default: all)
+    #
+    # Examples:
+    #   python recon_histograms.py xenon sf6
+    #   python recon_histograms.py --no-noise-cut --no-drive-cut xenon
+
+    args = sys.argv[1:]
+
+    apply_noise_cut = '--no-noise-cut' not in args
+    apply_drive_cut = '--no-drive-cut' not in args
+    apply_chi2_cut  = '--no-chi2-cut'  not in args
+    for flag in ('--no-noise-cut', '--no-drive-cut', '--no-chi2-cut'):
+        if flag in args:
+            args.remove(flag)
+
+    gas_filter = set(args) if args else set(datasets_config)
+
+    unknown = gas_filter - set(datasets_config)
+    if unknown:
+        print(f'Unknown gas type(s): {", ".join(sorted(unknown))}')
+        print(f'Valid types: {", ".join(sorted(datasets_config))}')
+        sys.exit(1)
+
     os.makedirs(outdir, exist_ok=True)
     outpath = os.path.join(outdir, outfile_name)
     print(f'Output: {outpath}')
+    print(f'Processing: {", ".join(sorted(gas_filter))}')
+    cuts_active = []
+    if apply_noise_cut:  cuts_active.append(f'noise<{noise_threshold_kev}keV')
+    if apply_drive_cut:  cuts_active.append(f'drive>{normalized_drive_power_threshold:.1e}')
+    if apply_chi2_cut:   cuts_active.append(f'chi2<{chi2_threshold}')
+    print(f'Cuts: {", ".join(cuts_active) if cuts_active else "none"}')
 
-    with h5py.File(outpath, 'w') as fout:
-        g = fout.create_group('recon_histograms')
-        bc = 0.5 * (hist_bins[:-1] + hist_bins[1:])
-        d = g.create_dataset('bc', data=bc, dtype=np.float64)
-        d.attrs['unit'] = 'keV/c'
+    # Open in append mode so unprocessed gas types are preserved
+    with h5py.File(outpath, 'a') as fout:
+        if 'recon_histograms' not in fout:
+            g = fout.create_group('recon_histograms')
+            bc = 0.5 * (hist_bins[:-1] + hist_bins[1:])
+            d = g.create_dataset('bc', data=bc, dtype=np.float64)
+            d.attrs['unit'] = 'keV/c'
+        else:
+            g = fout['recon_histograms']
 
         for gas_type, entries in datasets_config.items():
+            if gas_type not in gas_filter:
+                continue
+
+            # Replace the group if it already exists
+            if gas_type in g:
+                del g[gas_type]
             grp = g.create_group(gas_type)
+
             for dataset, data_type, file_prefix, nfiles in entries:
 
                 print(f'  {gas_type}/{dataset} ({nfiles} files)...')
                 recon = read_recon_all(dataset, data_type, file_prefix, nfiles)
-                _, hh, hh_nocal = get_summed_histogram(recon, hist_bins, remove_doublecounts=True)
+                bc, histograms = get_summed_histogram(
+                    recon, hist_bins, remove_doublecounts=True,
+                    apply_noise_cut=apply_noise_cut,
+                    apply_drive_cut=apply_drive_cut,
+                    apply_chi2_cut=apply_chi2_cut,
+                )
 
                 unit = f'count/{hist_bins[1]-hist_bins[0]:.0f}keV'
                 p = mean_pressure(recon)
 
-                d = grp.create_dataset(dataset, data=hh, dtype=np.int64)
-                d.attrs['pressure_mbar'] = p
-                d.attrs['unit'] = unit
-
-                d2 = grp.create_dataset(dataset + '_nocal', data=hh_nocal, dtype=np.int64)
-                d2.attrs['pressure_mbar'] = p
-                d2.attrs['unit'] = unit
+                for key, data in histograms.items():
+                    # 'all' stage uses bare dataset name; 'all_nocal'/'all_cal'
+                    # drop the 'all_' prefix for backward compatibility
+                    if key == 'all':
+                        name = dataset
+                    elif key.startswith('all_'):
+                        name = f'{dataset}_{key[4:]}'  # all_nocal → _nocal
+                    else:
+                        name = f'{dataset}_{key}'
+                    d = grp.create_dataset(name, data=data, dtype=np.int64)
+                    d.attrs['pressure_mbar'] = p
+                    d.attrs['unit'] = unit
 
     print('Done.')

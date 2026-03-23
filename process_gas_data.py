@@ -23,8 +23,15 @@ bandpass_lb, bandpass_ub = (35000, 80000)   # Analysis bandwidth in Hz (Sphere 2
 lowpass_order = 3
 notch_freq = 137000
 
+# Fixed reconstruction parameters. Set to a float to pin to a constant for all
+# datasets/files instead of using the per-file Voigt fit result.
+# Set to None to use the per-file fit (default behaviour).
+fixed_gamma_damping = 1 * 2 * np.pi   # rad/s, e.g. 200 * 2 * np.pi
+fixed_c_imp         = 1.5e-22   # raw units; bypasses c_imp_voigt × c_imp_scaling entirely
+
 # An arbitrary scaling parameter for the noise floor in
 # the noise model
+# use a a fallback when c_imp_scan failed
 c_imp_scaling = 1/5
 
 # Per-dataset c_imp_scaling overrides for non-CAL_MODE processing.
@@ -37,12 +44,6 @@ c_imp_scaling_overrides = {
     ('sf6_data', '20260219_p6e_1e-6mbar'): 1/5,
     ('sf6_data', '20260219_p6e_7e-8mbar'): 1/5,
 }
-
-# Fixed reconstruction parameters. Set to a float to pin to a constant for all
-# datasets/files instead of using the per-file Voigt fit result.
-# Set to None to use the per-file fit (default behaviour).
-fixed_gamma_damping = None   # rad/s, e.g. 200 * 2 * np.pi
-fixed_c_imp         = None   # raw units; bypasses c_imp_voigt × c_imp_scaling entirely
 
 # Params for identifying pulse indices
 positive_pulse = True
@@ -76,7 +77,7 @@ waveform_half_len = 1500                        # samples each side of peak to s
 # in scan plot if Gaussian fit fails for a given scaling)
 # amp2kev_from_cal = 6792.86423779262    # sphere_20260105
 # amp2kev_from_cal = 8363.560351624732   # sphere_20260215
-amp2kev_from_cal = 14460.84503586        # sphere_20260215; after introducing imprecision
+amp2kev_from_cal = 10497.219118653622        # sphere_20260215; after introducing imprecision
 
 # For calculating chi2, we simply assume an approximate 60 keV sigma
 # (not currently used — process_dataset() derives ds_sigma_amp from per-dataset amp2kev)
@@ -171,6 +172,22 @@ def get_normalized_template(sphere, bounds=(1250, 1750), downsampled=False):
     else:
         return ret
 
+def load_cal_from_npz(sphere, bounds=(1250, 1750)):
+    """Load 20V pulse template and amp2kev directly from the calibration npz.
+
+    Used when both fixed_gamma_damping and fixed_c_imp are set, bypassing
+    the per-dataset cal summary HDF5 entirely.
+    """
+    npz_path = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}/{sphere}_impulse_recon_combined.npz'
+    pulse_shape_file = np.load(npz_path)
+    amp2kev = float(pulse_shape_file['amp2kev'])
+
+    template = pulse_shape_file['ps_20v']
+    template = template / np.max(template)
+    template = template[bounds[0]:bounds[1]]
+
+    return template, amp2kev
+
 def load_dataset_cal(dataset, data_type):
     """Load per-dataset calibration from the gas-type cal summary HDF5.
 
@@ -241,15 +258,20 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
     out_dir = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_data_processed/{sphere}/{type}/{dataset}'
     
     if not os.path.isdir(out_dir):
-        os.mkdir(out_dir)
+        os.makedirs(out_dir)
 
-    normalized_template, ds_c_imp_scaling, ds_amp2kev = load_dataset_cal(dataset, type)
+    if fixed_gamma_damping is not None and fixed_c_imp is not None:
+        normalized_template, ds_amp2kev = load_cal_from_npz(sphere)
+        print(f'  [{dataset}] using npz calibration: amp2kev={ds_amp2kev:.2f}')
+        print(f'  [{dataset}] fixed_gamma_damping = {fixed_gamma_damping:.4g} rad/s')
+        print(f'  [{dataset}] fixed_c_imp = {fixed_c_imp:.4g}')
+    else:
+        normalized_template, ds_c_imp_scaling, ds_amp2kev = load_dataset_cal(dataset, type)
+        if fixed_gamma_damping is not None:
+            print(f'  [{dataset}] fixed_gamma_damping = {fixed_gamma_damping:.4g} rad/s (overrides per-file Voigt fit)')
+        if fixed_c_imp is not None:
+            print(f'  [{dataset}] fixed_c_imp = {fixed_c_imp:.4g} (overrides c_imp_voigt × c_imp_scaling)')
     ds_sigma_amp = 60 / ds_amp2kev   # chi-square noise in raw amplitude units (~60 keV/c)
-
-    if fixed_gamma_damping is not None:
-        print(f'  [{dataset}] fixed_gamma_damping = {fixed_gamma_damping:.4g} rad/s (overrides per-file Voigt fit)')
-    if fixed_c_imp is not None:
-        print(f'  [{dataset}] fixed_c_imp = {fixed_c_imp:.4g} (overrides c_imp_voigt × c_imp_scaling)')
 
     for i in range(nfile):
         outfile_name = f'{data_prefix}{i+idx_start}_processed.hdf5'
@@ -336,6 +358,11 @@ def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
             g.attrs['pressure_mbar'] = pressure_mbar
             g.attrs['timestamp'] = timestamp
             g.attrs['amp2kev'] = ds_amp2kev
+
+            if fixed_c_imp is not None:
+                g.attrs['fixed_c_imp'] = fixed_c_imp
+            if fixed_gamma_damping is not None:
+                g.attrs['fixed_gamma_damping'] = fixed_gamma_damping
 
             # Calculated PSD and Voigt fit parameters
             if p_fit is not None:
@@ -597,7 +624,7 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
 
     # ── Optional c_imp_scaling scan on pilot files ────────────────────────
     chosen_scaling = c_imp_scaling   # default from config
-    if SCAN_C_IMP:
+    if SCAN_C_IMP and fixed_c_imp is None:
         n_max = min(scan_max_load, nfile)
 
         # Load files incrementally, stopping as soon as we have scan_n_files good ones.
@@ -658,7 +685,9 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
             chosen_scaling = c_imp_scaling
 
     override = c_imp_scaling_overrides.get((type, dataset))
-    if override is not None:
+    if fixed_c_imp is not None:
+        print(f'  fixed_c_imp = {fixed_c_imp:.4g} — c_imp_scaling scan/override skipped')
+    elif override is not None:
         print(f'  c_imp_scaling override: {override:.4g} (scan/default had {chosen_scaling:.4g})')
         chosen_scaling = override
     else:
@@ -666,8 +695,6 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
 
     if fixed_gamma_damping is not None:
         print(f'  fixed_gamma_damping = {fixed_gamma_damping:.4g} rad/s (overrides per-file Voigt fit)')
-    if fixed_c_imp is not None:
-        print(f'  fixed_c_imp = {fixed_c_imp:.4g} (overrides c_imp_voigt × c_imp_scaling; c_imp_scaling ignored)')
 
     # ── Main loop: process all files ──────────────────────────────────────
     amps, idxs_in_win, f_res_list = [], [], []
@@ -685,11 +712,12 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
         dtt, zz, zz_bp, gg, c_imp_voigt, gamma_damping, p_fit, sv_imp, ffz, sv_z = \
             _load_and_preprocess_file(data_dir, data_prefix, i, idx_start)
 
-        c_imp = c_imp_voigt * chosen_scaling
-        if fixed_gamma_damping is not None:
-            gamma_damping = fixed_gamma_damping
         if fixed_c_imp is not None:
             c_imp = fixed_c_imp
+        else:
+            c_imp = c_imp_voigt * chosen_scaling
+        if fixed_gamma_damping is not None:
+            gamma_damping = fixed_gamma_damping
 
         if sv_imp is not None:
             sv_imps.append(sv_imp)
@@ -701,7 +729,7 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
         pulse_indices = utils.get_pulse_idx(gg, trigger_val, positive_pulse)
 
         for pulse_idx in pulse_indices:
-            window, f_amp, f_lp, amp = utils.recon_pulse(
+            window, _, f_lp, amp = utils.recon_pulse(
                 pulse_idx, dtt, zz_bp, dd=gg, c_imp=c_imp, gamma_damping=gamma_damping,
                 analysis_window_length=analysis_window_length,
                 prepulse_window_length=fit_window_length,
@@ -747,7 +775,12 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
         print(f'Writing {outfile}')
         g = fout.create_group('data_processed')
 
-        g.attrs['c_imp_scaling'] = chosen_scaling
+        if fixed_c_imp is not None:
+            g.attrs['fixed_c_imp'] = fixed_c_imp
+        else:
+            g.attrs['c_imp_scaling'] = chosen_scaling
+        if fixed_gamma_damping is not None:
+            g.attrs['fixed_gamma_damping'] = fixed_gamma_damping
 
         if sv_imps:
             if ffz_saved is not None:

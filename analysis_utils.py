@@ -446,7 +446,49 @@ def fit_amps_gaus(normalized_amps, bins=None, noise=False, return_bins=False):
     else:
         return hhs, bcs, gps
 
-def get_unnormalized_amps(data_files, 
+
+def get_pulse_times(data_files, positive_pulse, prepulse_window_length, analysis_window_length):
+    pulse_indices, pulse_times = [], []
+
+    for file in data_files:
+        with h5py.File(file, 'r') as f:
+            timestamp = f['data'].attrs['timestamp']
+
+        dtt, nn = load_timestreams(file, ['G'])
+        dd = nn[0]
+
+        trigger_level = positive_pulse * 0.5
+        pulse_idx = get_pulse_idx(dd, trigger_level, positive_pulse)
+
+        good_idx = np.logical_and(pulse_idx > prepulse_window_length, pulse_idx<(dd.size-analysis_window_length))
+        good_pulse_idx = pulse_idx[good_idx]
+
+        pulse_indices.append(good_pulse_idx)
+        pulse_times.append(timestamp + dtt*good_pulse_idx)
+    
+    return np.concatenate(pulse_indices), np.concatenate(pulse_times)
+
+def recon_force(dtt, zz_bp, freq_lp, lowpass_order, gamma_damping, c_imp=None):
+    fs = int(np.ceil(1 / dtt))
+
+    zzk = rfft(zz_bp)
+    ff = rfftfreq(zz_bp.size, dtt)
+    pp = np.abs(zzk)**2 / (zz_bp.size / dtt)
+
+    omega0_fit = ff[np.argmax(pp)] * 2 * np.pi
+    amp = get_pulse_amp(dtt, zz_bp, omega0_fit, gamma_damping, c_imp)
+    amp_lp = lowpass_filtered(amp, fs, freq_lp, lowpass_order)
+
+    return amp/1e9, amp_lp/1e9
+
+
+# ---------------------------------------------------------------------------
+# ARCHIVED — no longer used in active analysis (superseded by recon_pulse /
+# process_gas_data.py pipeline). Retained for reference by sphere_20251212
+# notebooks.
+# ---------------------------------------------------------------------------
+
+def get_unnormalized_amps(data_files,
                           noise=False,
                           no_search=False,
                           positive_pulse=True,
@@ -473,7 +515,7 @@ def get_unnormalized_amps(data_files,
 
         trigger_level = positive_pulse * 0.5
         pulse_idx = get_pulse_idx(dd, trigger_level, positive_pulse)
-        
+
         if noise:
             # Fit noise away from the pulses
             pulse_idx = np.ceil(0.5 * (pulse_idx[:-1] + pulse_idx[1:])).astype(np.int64)
@@ -489,10 +531,10 @@ def get_unnormalized_amps(data_files,
             # 20241205: use a much narrower search window (25 indices; 5 us)
             # 20250211: change window length to 50000 indices and search window to 50 us
             # to be consistent with DM search
-            window, f, f_lp, amp = recon_pulse(idx, dtt, zz_bp, dd, 
-                                               analysis_window_length, 
-                                               prepulse_window_length, 
-                                               search_window_length, 
+            window, f, f_lp, amp = recon_pulse(idx, dtt, zz_bp, dd,
+                                               analysis_window_length,
+                                               prepulse_window_length,
+                                               search_window_length,
                                                search_offset_length,
                                                lowpass_freq,
                                                lowpass_order)
@@ -501,7 +543,7 @@ def get_unnormalized_amps(data_files,
                 if np.isnan(amp):
                     pass
                 elif no_search:
-                    # If no search, just take th middle value
+                    # If no search, just take the middle value
                     amps.append(np.abs(f_lp[np.ceil(f_lp.size/2).astype(np.int64)])/1e9)
                 else:
                     amps.append(amp)
@@ -510,37 +552,3 @@ def get_unnormalized_amps(data_files,
 
     amps = np.asarray(amps)
     return amps
-
-def get_pulse_times(data_files, positive_pulse, prepulse_window_length, analysis_window_length):
-    pulse_indices, pulse_times = [], []
-
-    for file in data_files:
-        with h5py.File(file, 'r') as f:
-            timestamp = f['data'].attrs['timestamp']
-
-        dtt, nn = load_timestreams(file, ['G'])
-        dd = nn[0]
-
-        trigger_level = positive_pulse * 0.5
-        pulse_idx = get_pulse_idx(dd, trigger_level, positive_pulse)
-
-        good_idx = np.logical_and(pulse_idx > prepulse_window_length, pulse_idx<(dd.size-analysis_window_length))
-        good_pulse_idx = pulse_idx[good_idx]
-
-        pulse_indices.append(good_pulse_idx)
-        pulse_times.append(timestamp + dtt*good_pulse_idx)
-    
-    return np.concatenate(pulse_indices), np.concatenate(pulse_times)
-
-def recon_force(dtt, zz_bp, f_lp, lowpass_order):
-    fs = int(np.ceil(1 / dtt))
-
-    zzk = rfft(zz_bp)
-    ff = rfftfreq(zz_bp.size, dtt)
-    pp = np.abs(zzk)**2 / (zz_bp.size / dtt)
-
-    omega0_fit = ff[np.argmax(pp)] * 2 * np.pi
-    amp = get_pulse_amp(dtt, zz_bp, omega0_fit, (ff[1]-ff[0])*2*np.pi)    
-    amp_lp = lowpass_filtered(amp, fs, f_lp, lowpass_order)
-
-    return amp/1e9, amp_lp/1e9
