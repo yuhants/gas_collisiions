@@ -2,19 +2,24 @@
 gen_signal_model_mc.py
 ----------------------
 Monte Carlo simulation of the expected gas-collision signal spectrum after the
-full search pipeline (exactly mirroring process_gas_data.py / recon_histograms.py).
+full search pipeline (exactly mirroring process_gas_data.py).
 
-For each requested (gas, pressure) pair the script:
+For each requested pressure the script:
   1. Draws Poisson-distributed collision events from the kinetic-theory spectrum.
   2. Injects them into bandlimited Gaussian noise at the sphere's measured level.
   3. Runs the same sub-window argmax search used in process_gas_data.py.
-  4. Applies the same quality cuts (noise-level, chi-squared, double-count rejection),
-     each of which can be disabled independently.
-  5. Accumulates the measured amplitude histogram and normalises it to a differential
-     event rate [Events / (keV/c) / s].
+  4. Saves per-window amplitude, chi-squared, noise-level, and index arrays in
+     exactly the same HDF5 format as process_gas_data.py so that
+     recon_histograms.py can apply quality cuts identically.
 
-Output is saved to data_processed/signal_model_mc/<tag>.npz with per-pressure histograms
-and the pure-noise floor, plus all configuration parameters as metadata.
+One HDF5 file is written per pressure under data_processed/signal_model_mc/<tag>/.
+Each file has the same internal structure as a sliding-window process_gas_data.py
+output, so recon_histograms.py can read it without modification.
+
+Note: f_res and driven_power are not simulated.  Nominal values that pass the
+recon_histograms.py drive-power cut are stored so the output can be fed into
+recon_histograms.py without --no-drive-cut.  To simulate noise-only windows,
+add 0 to pressures_mbar (zero pressure → zero event rate → pure noise).
 
 Usage
 -----
@@ -27,6 +32,7 @@ import numpy as np
 from scipy.integrate import cumulative_trapezoid
 from scipy.signal import butter, sosfilt
 import os
+import h5py
 
 import calc_gas_collision_spectrum as calc_gas
 
@@ -35,49 +41,33 @@ import calc_gas_collision_spectrum as calc_gas
 # ============================================================
 
 # ── Sphere / calibration ──────────────────────────────────────────────────
-sphere           = 'sphere_20260215'
-amp2kev          = 8363.560351624732   # keV/c per amplitude unit
-sphere_radius    = 50e-9               # m
-bandpass_lb      = 38_000              # Hz
-bandpass_ub      = 75_000              # Hz
-lowpass_order    = 3
-sigma_noise_kev  = 60.0               # keV/c  (typical noise_level_amp × amp2kev)
+sphere        = 'sphere_20260215'
+sphere_radius = 50e-9   # m
 
-# Path to the combined pulse-shape template (.npz, contains key 'ps_20v').
+# Path to pulse-shape template (.npz, must contain keys 'ps_20v' and 'amp2kev').
 # Set to None to auto-resolve from data_processed/pulse_calibration/.
+# amp2kev is read directly from this file.
 pulse_template_path = None
 
 # ── Gas / collision theory ────────────────────────────────────────────────
 # Supported gas names: 'xe', 'kr', 'sf6', 'n2', 'he', 'ar'
-# (or pass mg_amu directly in gas_configs below)
 gas = 'xe'
 
-T_gas    = 293    # K  — ambient gas temperature
-T_sensor = 900    # K  — laser-heated sphere surface temperature
-alpha    = 0.9    # thermal accommodation coefficient
+T_gas    = 293   # K — ambient gas temperature
+T_sensor = 293.05   # K — laser-heated sphere surface temperature
+alpha    = 0.9   # thermal accommodation coefficient
 
-# Pressures (mbar) to simulate.  Each entry becomes one column in the output.
-pressures_mbar = [1e-8, 3e-8, 1e-7, 3e-7, 1e-6]
-
-# ── Quality cuts ──────────────────────────────────────────────────────────
-# Set to False / np.inf to disable a cut.
-apply_noise_cut  = True    # per-analysis-window noise-level cut
-apply_chi2_cut   = True    # per-sub-window chi-squared cut
-apply_dc_cut     = True    # double-count rejection
-
-noise_threshold_kev = 200.0   # keV/c  (per-window noise-level upper limit)
-chi2_threshold      = 700.0   # per-sub-window
+# Pressures (mbar) to simulate.  Each entry becomes one HDF5 output file.
+# Use 0 for a noise-only run (no signal events injected).
+pressures_mbar = [0, 1e-8, 3e-8, 5e-8, 7e-8, 1e-7, 3e-7, 5e-7, 7e-7, 1e-6]
 
 # ── MC settings ───────────────────────────────────────────────────────────
-n_analysis_windows = 512   # number of full 105-ms windows to simulate
+n_analysis_windows = 512   # number of full 105-ms windows to simulate per pressure
 rng_seed           = 42
 
 # ── Output ────────────────────────────────────────────────────────────────
 output_dir = 'data_processed/signal_model_mc'
-output_tag = None   # if None, auto-generated from sphere + gas + cuts
-
-# Output histogram binning (keV/c)
-bins = np.arange(0, 2000, 25)
+output_tag = 'mc_xe'   # if None, auto-generated as '{sphere}_{gas}'
 
 # ============================================================
 # GAS MASS TABLE  (atomic mass units)
@@ -96,155 +86,98 @@ GAS_MASSES_AMU = {
 # FIXED DETECTOR PARAMETERS  (must match process_gas_data.py)
 # ============================================================
 
-fs                     = 5_000_000           # Hz
+fs                     = 5_000_000      # Hz
 dt                     = 1 / fs
-analysis_window_length = 2**19               # 524 288 samples ≈ 104.9 ms
-search_window_length   = 2**8                # 256 samples ≈ 51.2 µs
+analysis_window_length = 2**19          # 524 288 samples ≈ 104.9 ms
+search_window_length   = 2**8           # 256 samples ≈ 51.2 µs
 lb                     = 2 * search_window_length   # searchable-region start (512)
 n_searches             = (analysis_window_length // search_window_length) - 3   # 2045
 
-T_search          = search_window_length   / fs
 T_analysis_window = analysis_window_length / fs
+T_search          = search_window_length   / fs
 
-# Double-count rejection thresholds (ported from recon_histograms.py)
-DC_AMP_THR_KEV          = 0
-DC_OPP_SIGN_AMP_THR_KEV = 180
-DC_IDX_THR              = 25
-DC_OPP_SIGN_IDX_THR     = search_window_length // 3   # 85
+# Bandpass + lowpass filter — must match process_gas_data.py for sphere_20260215
+# (updated to 35–80 kHz after introducing imprecision)
+bandpass_lb   = 35_000   # Hz
+bandpass_ub   = 80_000   # Hz
+lowpass_order = 3
+
+# Chi-squared noise assumption — must match process_gas_data.py:
+#   ds_sigma_amp = 60 / ds_amp2kev  (hardcoded, not derived from noise_level_amp)
+sigma_noise_kev = 60.0   # keV/c
+
+# Nominal f_res and driven_power written to every output window.
+# Not simulated; chosen so recon_histograms.py drive-power cut passes
+# (norm_drive ≈ 9.8e-9 >> threshold 4.5e-9 for these values).
+_NOMINAL_F_RES      = 50_000.0   # Hz
+_NOMINAL_DRIVEN_PWR = 1e-7       # a.u.
 
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 
 def _resolve_template_path(sphere):
-    """Return the default pulse-template path for a sphere name."""
+    """Return the default pulse-template npz path for a sphere."""
     return os.path.join(
         'data_processed', 'pulse_calibration',
-        f'{sphere}_pulse_shape_template_combined.npz'
+        sphere,
+        f'{sphere}_impulse_recon_combined.npz',
     )
 
 
-def _load_pulse_template(path, search_window_length):
+def _load_pulse_template(path):
     """
-    Load normalised pulse template from .npz file.
+    Load normalised pulse template and amp2kev from an impulse_recon_combined.npz.
 
     Returns
     -------
-    ps_norm              : full normalised template (peak = 1)
-    peak_cal             : index of peak within ps_norm
-    normalized_template_chi2 : 500-sample chi-squared template (±250 around peak)
-    fwhm_samps           : pulse FWHM in samples
+    ps_norm                  : (3000,) float64 — normalised template (peak = 1)
+    peak_cal                 : int — index of peak within ps_norm
+    normalized_template_chi2 : (500,) float64 — ±250-sample chi2 template
+    amp2kev                  : float — keV/c per raw amplitude unit
     """
-    cal_file = np.load(path)
-    ps_raw   = cal_file['ps_20v']
+    cal      = np.load(path)
+    ps_raw   = cal['ps_20v']
+    amp2kev  = float(cal['amp2kev'])
     peak_cal = int(np.argmax(ps_raw))
     ps_norm  = ps_raw / ps_raw[peak_cal]
 
     half_chi2 = 250
     normalized_template_chi2 = ps_norm[peak_cal - half_chi2 : peak_cal + half_chi2].copy()
 
-    half           = search_window_length // 2
-    pulse_template = ps_norm[peak_cal - half : peak_cal + half]
-    fwhm_samps     = int(np.sum(pulse_template > 0.5))
-
-    return ps_norm, peak_cal, normalized_template_chi2, fwhm_samps
+    return ps_norm, peak_cal, normalized_template_chi2, amp2kev
 
 
 def _calibrate_noise(sos_bp, sos_lp, sigma_noise_kev, amp2kev):
     """
-    Determine the white-noise std (sigma_wn) needed so that bandpass + lowpass
-    filtered output has std = sigma_noise_kev / amp2kev.
+    Find the white-noise std (sigma_wn) that produces std = sigma_noise_kev / amp2kev
+    after bandpass + lowpass filtering.
     """
-    n_char   = 2**22
-    rng_char = np.random.default_rng(9999)
-    white    = rng_char.normal(0, 1, n_char)
-    bp       = sosfilt(sos_bp, white)
-    lp       = sosfilt(sos_lp, bp)
-    std_ratio = np.std(lp[n_char // 100:])
-    sigma_amp = sigma_noise_kev / amp2kev
-    return sigma_amp / std_ratio   # sigma_wn
+    n_char    = 2**22
+    rng_char  = np.random.default_rng(9999)
+    white     = rng_char.normal(0, 1, n_char)
+    lp        = sosfilt(sos_lp, sosfilt(sos_bp, white))
+    std_ratio = np.std(lp[n_char // 100:])   # skip filter warm-up
+    return (sigma_noise_kev / amp2kev) / std_ratio
 
 
-# ── Core MC functions ──────────────────────────────────────────────────────
-
-def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
-                             amp2kev=None,
-                             amp_thr_kev=DC_AMP_THR_KEV,
-                             opp_sign_amp_thr_kev=DC_OPP_SIGN_AMP_THR_KEV,
-                             double_count_idx_thr=DC_IDX_THR,
-                             opp_sign_idx_thr=DC_OPP_SIGN_IDX_THR):
-    """
-    Double-count rejection — ported verbatim from recon_histograms.py.
-
-    Parameters
-    ----------
-    amplitude      : (n_windows, n_searches) float  — signed amplitudes in amp units
-    good_det_noise : (n_windows,) bool
-    idx_in_window  : (n_windows, n_searches) int    — absolute peak indices
-    amp2kev        : calibration factor; uses module-level default if None
-
-    Returns
-    -------
-    amplitude copy with double-count entries set to NaN.
-    """
-    if amp2kev is None:
-        amp2kev = globals()['amp2kev']
-
-    ret         = np.array(amplitude, dtype=np.float64)
-    n_sw        = amplitude.shape[1]
-    min_thr     = min(amp_thr_kev, opp_sign_amp_thr_kev)
-
-    large_pulses = (
-        (np.abs(ret) * amp2kev > min_thr)
-        & np.tile(good_det_noise[:, np.newaxis], (1, n_sw))
-    )
-    abs_idx_large    = idx_in_window[large_pulses].astype(np.int64)
-    idx_sep          = np.abs(np.diff(abs_idx_large, append=analysis_window_length))
-    large_pulses_pos = np.argwhere(large_pulses)
-    amplitude_large  = ret[large_pulses]
-
-    same_peak   = idx_sep < double_count_idx_thr
-    signs       = np.sign(amplitude_large)
-    opp_sign    = np.append(signs[:-1] != signs[1:], False)
-    peak_trough = opp_sign & (idx_sep < opp_sign_idx_thr)
-
-    for i in range(len(large_pulses_pos) - 1):
-        if np.isnan(amplitude_large[i]):
-            continue
-        if large_pulses_pos[i][0] != large_pulses_pos[i + 1][0]:
-            continue
-        min_pair_kev = min(abs(amplitude_large[i]), abs(amplitude_large[i + 1])) * amp2kev
-        sp = same_peak[i]   and (min_pair_kev > amp_thr_kev)
-        pt = peak_trough[i] and (min_pair_kev > opp_sign_amp_thr_kev)
-        if not sp and not pt:
-            continue
-        if abs(amplitude_large[i]) < abs(amplitude_large[i + 1]):
-            ret[large_pulses_pos[i][0],     large_pulses_pos[i][1]]     = np.nan
-            amplitude_large[i]     = np.nan
-        else:
-            ret[large_pulses_pos[i + 1][0], large_pulses_pos[i + 1][1]] = np.nan
-            amplitude_large[i + 1] = np.nan
-    return ret
-
+# ── Core simulation functions ───────────────────────────────────────────────
 
 def sample_spectrum_icdf(qq, drdqz, n_samples, rng):
     """Draw n_samples momenta (keV/c) from drdqz via inverse-CDF sampling."""
     total_rate = np.trapz(drdqz, qq)
     cdf        = cumulative_trapezoid(drdqz, qq, initial=0) / total_rate
-    u          = rng.uniform(0, 1, n_samples)
-    return np.interp(u, cdf, qq)
+    return np.interp(rng.uniform(0, 1, n_samples), cdf, qq)
 
 
 def gen_analysis_window_noise(sigma_wn, sos_bp, sos_lp, rng, n_pad=4096):
     """
-    Generate one full 2^19-sample amplitude noise trace via bandpass + lowpass
-    filtered white Gaussian noise (same filter chain as process_gas_data.py).
+    Generate one 2^19-sample amplitude noise trace via bandpass + lowpass filtered
+    white Gaussian noise — same filter chain as process_gas_data.py.
     """
     total = n_pad + analysis_window_length
     white = rng.normal(0, sigma_wn, total)
-    bp    = sosfilt(sos_bp, white)
-    lp    = sosfilt(sos_lp, bp)
-    return lp[n_pad:]
+    return sosfilt(sos_lp, sosfilt(sos_bp, white))[n_pad:]
 
 
 def inject_signals(amp_lp, q_kev_arr, positions, ps_norm, peak_cal, amp2kev):
@@ -278,7 +211,7 @@ def search_and_recon(amp_lp):
     Returns
     -------
     amps          : (n_searches,) signed amplitudes at peak positions
-    idx_in_window : (n_searches,) absolute indices within the analysis window
+    idx_in_window : (n_searches,) int32 absolute indices within the analysis window
     """
     ub           = analysis_window_length - search_window_length
     amp_search   = amp_lp[lb:ub]
@@ -287,8 +220,7 @@ def search_and_recon(amp_lp):
     local_idx    = np.argmax(np.abs(amp_reshaped), axis=1)
     idx_in_win   = (local_idx + lb
                     + search_window_length * np.arange(n_sw, dtype=np.int32))
-    amps         = amp_lp[idx_in_win]
-    return amps, idx_in_win
+    return amp_lp[idx_in_win], idx_in_win
 
 
 def calc_chi2_all(amp_lp, idx_in_window, normalized_template_chi2, sigma_p_amp):
@@ -296,8 +228,7 @@ def calc_chi2_all(amp_lp, idx_in_window, normalized_template_chi2, sigma_p_amp):
     Vectorised chi-squared for all sub-windows using the 500-sample template,
     matching calc_chisquares() in process_gas_data.py (window_size=250).
 
-    Returns np.inf for edge sub-windows where the 500-sample window would fall
-    outside amp_lp.
+    Returns np.inf for edge sub-windows where the 500-sample window falls outside.
     """
     half    = len(normalized_template_chi2) // 2   # 250
     win_len = len(amp_lp)
@@ -317,81 +248,85 @@ def calc_chi2_all(amp_lp, idx_in_window, normalized_template_chi2, sigma_p_amp):
     return chi2
 
 
-# ── Main MC loop ───────────────────────────────────────────────────────────
+# ── Main MC loop ────────────────────────────────────────────────────────────
 
 def run_mc(n_windows, events_per_window, rng,
            sos_bp, sos_lp, sigma_wn, sigma_p_amp,
            ps_norm, peak_cal, normalized_template_chi2,
-           qq_kev, drdqz,
-           amp2kev_val,
-           noise_thr_kev=200.0, chi2_thr=700.0, apply_dc=True):
+           qq_kev, drdqz, amp2kev_val):
     """
-    Run MC simulation over n_windows full analysis windows.
+    Simulate n_windows full analysis windows and return raw per-window arrays
+    in the same format as process_gas_data.py (no cuts applied).
 
     For each window:
       1. Generate bandlimited Gaussian noise.
       2. Inject Poisson(events_per_window) signal events (random positions, ±1 signs).
       3. Search: argmax |amp| in each 256-sample sub-window.
-      4. Noise-level cut   (per window):   std(searchable region) < noise_thr_kev.
-      5. Chi-squared cut   (per sub-window): chi2 < chi2_thr.
-      6. Double-count rejection.
+      4. Compute chi-squared against the 500-sample pulse template.
+      5. Record noise-level (std of searchable region in raw amp units).
 
     Parameters
     ----------
-    noise_thr_kev : pass np.inf to disable noise-level cut
-    chi2_thr      : pass np.inf to disable chi-squared cut
-    apply_dc      : set False to skip double-count rejection
+    events_per_window : Poisson mean; pass 0 for noise-only (no injection).
 
     Returns
     -------
-    q_meas_kev : np.ndarray — passing |amplitudes| in keV/c
-    n_good     : int        — number of analysis windows that passed noise-level cut
+    amplitude       : (n_windows, n_searches) float64 — signed raw amplitudes
+    idx_in_window   : (n_windows, n_searches) int32
+    noise_level_amp : (n_windows,)            float64 — std in raw amp units
+    chisquare       : (n_windows, n_searches) float64
+    injected_events : dict with keys:
+        'q_true_kev'  : (N,) float64 — true |qz| in keV/c (unsigned)
+        'positions'   : (N,) int32   — peak sample position in analysis window
+        'signs'       : (N,) int8    — ±1 injection sign
+        'window_idx'  : (N,) int32   — analysis window index
+        Sub-window index can be derived: (positions - lb) // search_window_length
     """
-    q_meas_list = []
-    n_good      = 0
+    amplitude_all       = np.zeros((n_windows, n_searches), dtype=np.float64)
+    idx_in_window_all   = np.zeros((n_windows, n_searches), dtype=np.int32)
+    noise_level_amp_all = np.zeros(n_windows,               dtype=np.float64)
+    chisquare_all       = np.zeros((n_windows, n_searches), dtype=np.float64)
 
-    for _ in range(n_windows):
+    inj_q_true   = []
+    inj_pos      = []
+    inj_signs    = []
+    inj_win_idx  = []
+
+    for i in range(n_windows):
         amp_lp = gen_analysis_window_noise(sigma_wn, sos_bp, sos_lp, rng)
 
-        # Signal injection
-        n_events = rng.poisson(events_per_window)
-        if n_events > 0:
-            q_true = sample_spectrum_icdf(qq_kev, drdqz, n_events, rng)
-            signs  = rng.integers(0, 2, size=n_events) * 2 - 1
-            positions = rng.integers(
-                lb, analysis_window_length - search_window_length, size=n_events
-            )
-            inject_signals(amp_lp, q_true * signs, positions, ps_norm, peak_cal, amp2kev_val)
+        if events_per_window > 0:
+            n_events = rng.poisson(events_per_window)
+            if n_events > 0:
+                q_true    = sample_spectrum_icdf(qq_kev, drdqz, n_events, rng)
+                signs     = rng.integers(0, 2, size=n_events) * 2 - 1
+                positions = rng.integers(
+                    lb, analysis_window_length - search_window_length, size=n_events
+                )
+                inject_signals(amp_lp, q_true * signs, positions,
+                               ps_norm, peak_cal, amp2kev_val)
 
-        # Search
+                inj_q_true.append(q_true)
+                inj_pos.append(positions)
+                inj_signs.append(signs)
+                inj_win_idx.append(np.full(n_events, i, dtype=np.int32))
+
         amps, idx_win = search_and_recon(amp_lp)
+        chi2          = calc_chi2_all(amp_lp, idx_win, normalized_template_chi2, sigma_p_amp)
 
-        # Noise-level cut
-        noise_level_kev = (
-            np.std(amp_lp[lb : analysis_window_length - search_window_length]) * amp2kev_val
-        )
-        if noise_level_kev >= noise_thr_kev:
-            continue
-        n_good += 1
+        amplitude_all[i]       = amps
+        idx_in_window_all[i]   = idx_win
+        noise_level_amp_all[i] = np.std(amp_lp[lb : analysis_window_length - search_window_length])
+        chisquare_all[i]       = chi2
 
-        # Chi-squared cut
-        chi2    = calc_chi2_all(amp_lp, idx_win, normalized_template_chi2, sigma_p_amp)
-        amps_2d = amps.reshape(1, -1)
-        idx_2d  = idx_win.reshape(1, -1)
-        if chi2_thr < np.inf:
-            amps_2d[0, chi2 >= chi2_thr] = np.nan
+    injected_events = {
+        'q_true_kev':  np.concatenate(inj_q_true)   if inj_q_true else np.empty(0, dtype=np.float64),
+        'positions':   np.concatenate(inj_pos)       if inj_pos   else np.empty(0, dtype=np.int32),
+        'signs':       np.concatenate(inj_signs)     if inj_signs else np.empty(0, dtype=np.int8),
+        'window_idx':  np.concatenate(inj_win_idx)   if inj_win_idx else np.empty(0, dtype=np.int32),
+    }
 
-        # Double-count rejection
-        if apply_dc:
-            amps_2d = throw_away_doublecounts(
-                amps_2d, np.array([True]), idx_2d, amp2kev=amp2kev_val
-            )
-
-        passing = amps_2d[0]
-        passing = np.abs(passing[~np.isnan(passing)]) * amp2kev_val
-        q_meas_list.extend(passing)
-
-    return np.array(q_meas_list), n_good
+    return amplitude_all, idx_in_window_all, noise_level_amp_all, chisquare_all, injected_events
 
 
 # ============================================================
@@ -399,165 +334,109 @@ def run_mc(n_windows, events_per_window, rng,
 # ============================================================
 
 def main():
-    global amp2kev   # allow config-block value to be passed into helper that uses it
-
-    # ── Resolve gas mass ──────────────────────────────────────────────────
     gas_key = gas.lower()
     if gas_key not in GAS_MASSES_AMU:
-        raise ValueError(
-            f"Unknown gas '{gas}'. Choose from: {list(GAS_MASSES_AMU.keys())}"
-        )
+        raise ValueError(f"Unknown gas '{gas}'. Choose from: {list(GAS_MASSES_AMU.keys())}")
     mg_amu = GAS_MASSES_AMU[gas_key]
 
-    # ── Effective cut settings ────────────────────────────────────────────
-    noise_thr = noise_threshold_kev if apply_noise_cut else np.inf
-    chi2_thr  = chi2_threshold      if apply_chi2_cut  else np.inf
-    dc        = apply_dc_cut
-
-    cuts_tag = '_'.join([
-        'noise' if apply_noise_cut  else 'nonoise',
-        'chi2'  if apply_chi2_cut   else 'nochi2',
-        'dc'    if apply_dc_cut     else 'nodc',
-    ])
-
-    # ── Output tag ────────────────────────────────────────────────────────
-    tag = output_tag or f'{sphere}_{gas_key}_{cuts_tag}'
-
-    os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, f'{tag}.npz')
+    tag     = output_tag or f'{sphere}_{gas_key}'
+    out_dir = os.path.join(output_dir, tag)
+    os.makedirs(out_dir, exist_ok=True)
 
     # ── Filters ───────────────────────────────────────────────────────────
     sos_bp = butter(lowpass_order, [bandpass_lb, bandpass_ub], 'bandpass', fs=fs, output='sos')
     sos_lp = butter(lowpass_order, bandpass_ub, 'lp', fs=fs, output='sos')
 
-    # ── Pulse template ────────────────────────────────────────────────────
+    # ── Pulse template + amp2kev (read from calibration file) ─────────────
     tpl_path = pulse_template_path or _resolve_template_path(sphere)
-    ps_norm, peak_cal, normalized_template_chi2, fwhm_samps = _load_pulse_template(
-        tpl_path, search_window_length
-    )
-
-    # ── Noise calibration ─────────────────────────────────────────────────
-    sigma_wn   = _calibrate_noise(sos_bp, sos_lp, sigma_noise_kev, amp2kev)
+    ps_norm, peak_cal, normalized_template_chi2, amp2kev = _load_pulse_template(tpl_path)
     sigma_p_amp = sigma_noise_kev / amp2kev
 
-    # ── Theory spectrum at unit pressure (1e-8 mbar) ──────────────────────
+    # ── Noise calibration ─────────────────────────────────────────────────
+    sigma_wn = _calibrate_noise(sos_bp, sos_lp, sigma_noise_kev, amp2kev)
+
+    # ── Theory spectrum (computed at 1e-8 mbar; scaled per pressure) ──────
     qq_kev = np.linspace(0.5, 2000, 2000)
     drdq_unit = calc_gas.dgamma_dp_tot_noneq(
         qq_kev, mg_amu, p_mbar=1e-8, alpha=alpha,
-        T_gas=T_gas, T_sensor=T_sensor, sphere_radius=sphere_radius
+        T_gas=T_gas, T_sensor=T_sensor, sphere_radius=sphere_radius,
     )
-    _, drdqz_unit = calc_gas.get_drdqz(qq_kev, drdq_unit)
+    _, drdqz_unit   = calc_gas.get_drdqz(qq_kev, drdq_unit)
     total_rate_unit = np.trapz(drdqz_unit, qq_kev)   # Hz at 1e-8 mbar
 
-    bc  = 0.5 * (bins[:-1] + bins[1:])
-    dq  = float(bins[1] - bins[0])
-
-    print(f'Sphere:         {sphere}')
-    print(f'Gas:            {gas.upper()}  ({mg_amu} amu)')
+    print(f'Sphere:              {sphere}')
+    print(f'Gas:                 {gas.upper()}  ({mg_amu} amu)')
+    print(f'amp2kev:             {amp2kev:.3f}  (from {tpl_path})')
+    print(f'bandpass:            {bandpass_lb/1e3:.0f}–{bandpass_ub/1e3:.0f} kHz')
+    print(f'sigma_noise_kev:     {sigma_noise_kev:.1f} keV/c  →  sigma_p_amp = {sigma_p_amp:.4e}')
     print(f'T_gas={T_gas} K   T_sensor={T_sensor} K   alpha={alpha}')
-    print(f'Cuts:           noise={apply_noise_cut}  chi2={apply_chi2_cut}  dc={apply_dc_cut}')
-    print(f'MC windows:     {n_analysis_windows} per pressure case')
-    print(f'Rate @ 1e-8 mbar: {total_rate_unit:.3f} Hz')
+    print(f'Rate @ 1e-8 mbar:    {total_rate_unit:.3f} Hz')
+    print(f'MC windows/pressure: {n_analysis_windows}')
+    print(f'Output dir:          {out_dir}')
     print()
 
-    # ── Noise-only run ────────────────────────────────────────────────────
-    print(f'Noise-only run ({n_analysis_windows} windows)…')
-    rng_noise = np.random.default_rng(rng_seed)
-    q_floor, n_floor_good = run_mc(
-        n_analysis_windows, events_per_window=0, rng=rng_noise,
-        sos_bp=sos_bp, sos_lp=sos_lp, sigma_wn=sigma_wn, sigma_p_amp=sigma_p_amp,
-        ps_norm=ps_norm, peak_cal=peak_cal,
-        normalized_template_chi2=normalized_template_chi2,
-        qq_kev=qq_kev, drdqz=drdqz_unit,
-        amp2kev_val=amp2kev,
-        noise_thr_kev=noise_thr, chi2_thr=chi2_thr, apply_dc=dc,
-    )
-    hh_noise, _ = np.histogram(q_floor, bins)
-    norm_noise   = np.sum(hh_noise) * T_search
-    rate_noise   = hh_noise / norm_noise if norm_noise > 0 else np.zeros_like(hh_noise, float)
-    print(f'  {n_floor_good}/{n_analysis_windows} good windows  |  '
-          f'{len(q_floor):,} sub-windows  |  '
-          f'noise floor median = {np.median(q_floor):.0f} keV/c\n')
-
-    # ── Signal runs ───────────────────────────────────────────────────────
-    hh_meas_all   = []
-    rate_meas_all = []
-    total_rates   = []
-    n_good_all    = []
-
+    # ── Per-pressure runs ─────────────────────────────────────────────────
     for p_idx, p in enumerate(pressures_mbar):
-        scale = p / 1e-8
-        drdqz_p = drdqz_unit * scale
-        total_rate_p = total_rate_unit * scale
-        ev_per_win   = total_rate_p * T_analysis_window
+        scale      = p / 1e-8 if p > 0 else 0.0
+        drdqz_p    = drdqz_unit * scale
+        ev_per_win = total_rate_unit * scale * T_analysis_window
 
-        label = f'{p:.1e} mbar'
-        print(f'Pressure {p_idx+1}/{len(pressures_mbar)}: {label}  '
-              f'({ev_per_win:.3f} events/window)…')
+        out_path = os.path.join(out_dir, f'{gas_key}_{p:.1e}mbar_mc.hdf5')
 
-        rng_sig = np.random.default_rng(rng_seed + 1 + p_idx)
-        q_meas, n_good = run_mc(
-            n_analysis_windows, ev_per_win, rng=rng_sig,
+        print(f'[{p_idx+1}/{len(pressures_mbar)}] {p:.1e} mbar  '
+              f'({ev_per_win:.3f} events/window)  →  {out_path}')
+
+        rng = np.random.default_rng(rng_seed + p_idx)
+        amplitude, idx_in_window, noise_level_amp, chisquare, injected = run_mc(
+            n_analysis_windows, ev_per_win, rng=rng,
             sos_bp=sos_bp, sos_lp=sos_lp, sigma_wn=sigma_wn, sigma_p_amp=sigma_p_amp,
             ps_norm=ps_norm, peak_cal=peak_cal,
             normalized_template_chi2=normalized_template_chi2,
             qq_kev=qq_kev, drdqz=drdqz_p,
             amp2kev_val=amp2kev,
-            noise_thr_kev=noise_thr, chi2_thr=chi2_thr, apply_dc=dc,
         )
 
-        hh, _ = np.histogram(q_meas, bins)
-        norm   = np.sum(hh) * T_search
-        rate   = hh / norm if norm > 0 else np.zeros_like(hh, float)
+        n_inj = len(injected['q_true_kev'])
+        print(f'  → {n_inj} signal events injected')
 
-        hh_meas_all.append(hh)
-        rate_meas_all.append(rate)
-        total_rates.append(total_rate_p)
-        n_good_all.append(n_good)
+        with h5py.File(out_path, 'w') as f:
+            g = f.create_group('data_processed')
+            g.create_dataset('amplitude',         data=amplitude,       dtype=np.float64)
+            g.create_dataset('idx_in_window',     data=idx_in_window,   dtype=np.int32)
+            g.create_dataset('good_detection',
+                             data=np.ones(n_analysis_windows, dtype=bool))
+            g.create_dataset('noise_level_amp',   data=noise_level_amp, dtype=np.float64)
+            g.create_dataset('chisquare',         data=chisquare,       dtype=np.float64)
+            g.create_dataset('f_res',
+                             data=np.full(n_analysis_windows, _NOMINAL_F_RES),
+                             dtype=np.float64)
+            g.create_dataset('driven_power',
+                             data=np.full(n_analysis_windows, _NOMINAL_DRIVEN_PWR),
+                             dtype=np.float64)
+            g.create_dataset('cal_pulse_indices', data=np.empty(0, dtype=np.int32))
 
-        print(f'  {n_good}/{n_analysis_windows} good windows  |  {len(q_meas):,} passing sub-windows')
+            # Injected signal event truth info
+            ig = f.create_group('mc_injected')
+            ig.create_dataset('q_true_kev',  data=injected['q_true_kev'],  dtype=np.float64)
+            ig.create_dataset('positions',   data=injected['positions'],   dtype=np.int32)
+            ig.create_dataset('signs',       data=injected['signs'],       dtype=np.int8)
+            ig.create_dataset('window_idx',  data=injected['window_idx'],  dtype=np.int32)
 
-    # ── Save ──────────────────────────────────────────────────────────────
-    np.savez(
-        out_path,
-        # Histogram axes
-        bins            = bins,
-        bc              = bc,
-        dq              = dq,
-        # Noise floor
-        hh_noise        = hh_noise,
-        rate_noise      = rate_noise,
-        n_floor_good    = np.array(n_floor_good),
-        # Per-pressure results
-        pressures_mbar  = np.array(pressures_mbar),
-        total_rates_hz  = np.array(total_rates),
-        hh_meas         = np.array(hh_meas_all),    # (n_pressures, n_bins)
-        rate_meas       = np.array(rate_meas_all),   # (n_pressures, n_bins)
-        n_good          = np.array(n_good_all),
-        # Theory spectrum (at unit pressure 1e-8 mbar; scale by p/1e-8 for other pressures)
-        qq_kev          = qq_kev,
-        drdqz_unit      = drdqz_unit,
-        # Configuration metadata
-        sphere          = np.array(sphere),
-        gas             = np.array(gas.lower()),
-        mg_amu          = np.array(mg_amu),
-        amp2kev         = np.array(amp2kev),
-        sphere_radius   = np.array(sphere_radius),
-        bandpass_lb     = np.array(bandpass_lb),
-        bandpass_ub     = np.array(bandpass_ub),
-        sigma_noise_kev = np.array(sigma_noise_kev),
-        T_gas           = np.array(T_gas),
-        T_sensor        = np.array(T_sensor),
-        alpha           = np.array(alpha),
-        n_analysis_windows = np.array(n_analysis_windows),
-        rng_seed        = np.array(rng_seed),
-        apply_noise_cut = np.array(apply_noise_cut),
-        apply_chi2_cut  = np.array(apply_chi2_cut),
-        apply_dc_cut    = np.array(apply_dc_cut),
-        noise_threshold_kev = np.array(noise_threshold_kev),
-        chi2_threshold  = np.array(chi2_threshold),
-    )
-    print(f'\nSaved → {out_path}')
+            # Standard attrs matching process_gas_data.py convention
+            g.attrs['pressure_mbar']       = p
+            g.attrs['amp2kev']             = amp2kev
+            g.attrs['fixed_c_imp']         = 1.5e-22
+            g.attrs['fixed_gamma_damping'] = 1 * 2 * np.pi
+
+            # MC-specific metadata
+            g.attrs['mc_gas']              = gas_key
+            g.attrs['mc_T_gas']            = T_gas
+            g.attrs['mc_T_sensor']         = T_sensor
+            g.attrs['mc_alpha']            = alpha
+            g.attrs['mc_n_windows']        = n_analysis_windows
+            g.attrs['mc_rng_seed']         = rng_seed + p_idx
+
+    print('\nDone.')
 
 
 if __name__ == '__main__':

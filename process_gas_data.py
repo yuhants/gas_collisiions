@@ -27,7 +27,7 @@ notch_freq = 137000
 # datasets/files instead of using the per-file Voigt fit result.
 # Set to None to use the per-file fit (default behaviour).
 fixed_gamma_damping = 1 * 2 * np.pi   # rad/s, e.g. 200 * 2 * np.pi
-fixed_c_imp         = 1.5e-22   # raw units; bypasses c_imp_voigt × c_imp_scaling entirely
+fixed_c_imp         = 1.5e-22   # raw units (normalized to susceptibility); bypasses c_imp_voigt × c_imp_scaling entirely
 
 # An arbitrary scaling parameter for the noise floor in
 # the noise model
@@ -64,7 +64,7 @@ CAL_MODE_DEFAULT = False
 # first scan_n_files files, select the one with the best amplitude resolution
 # (minimum Gaussian sigma/mean), then process all files with that scaling.
 # Saves a plot and records the chosen scaling as an HDF5 attribute.
-SCAN_C_IMP = True
+SCAN_C_IMP = False
 c_imp_scan_values = [1/50, 1/30, 1/10, 1/5, 1/3, 1, 3]   # scaling factors to scan
 scan_n_files      = 5                           # pilot files per dataset (good files)
 scan_max_load     = 20                          # max files to screen for outliers (>= scan_n_files)

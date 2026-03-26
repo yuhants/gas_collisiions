@@ -22,7 +22,7 @@ hist_bins = np.arange(0, 2000, 25)
 
 # Quality cut parameters
 noise_threshold_kev = 100
-chi2_threshold = 600
+chi2_threshold = 1000
 normalized_drive_power_threshold = 4.5e-9
 
 # Analysis window structure (must match process_gas_data.py)
@@ -37,7 +37,7 @@ doublecount_idx_thr              = 25   # max index separation for same-peak pai
 doublecount_opp_sign_idx_thr     = search_window_length // 3  # max index separation for opposite-sign pairs
 
 # Calibration-pulse identification parameters
-cal_pulse_amp_thr_kev = 650   # applied impulses are ~1100 keV/c; flag above this threshold
+cal_pulse_amp_thr_kev = 500   # applied impulses are ~1100 keV/c; flag above this threshold
 # Peak is expected in [pulse_index + offset, pulse_index + offset + search_window_length]
 # The +20 offset comes from get_search_window() in analysis_utils.py (pulse_length=20)
 cal_pulse_offset = 20
@@ -124,9 +124,53 @@ def read_recon_all(dataset, data_type, file_prefix, nfiles):
         idx_in_window_all.append(idx_in_window)
         pulse_indices_all.append(pulse_indices)
         amp2kev_all.append(file_amp2kev)
+        # print(pressure)
 
     # pressure_all stays at index 6, amp2kev_all at index 9
     return amps_all, good_detection_all, noise_level_all, chi2_all, driven_power_all, f_res_all, pressure_all, idx_in_window_all, pulse_indices_all, amp2kev_all
+
+
+def read_recon_mc_file(filepath):
+    """
+    Read a single MC output HDF5 file (from gen_signal_model_mc.py) and return
+    a recon_output tuple compatible with get_summed_histogram.
+
+    Parameters
+    ----------
+    filepath : str
+        Path to an MC HDF5 file produced by gen_signal_model_mc.py.
+
+    Returns
+    -------
+    recon_output : tuple
+        Same 10-element format as read_recon_all: each element is a length-1
+        list wrapping the corresponding array.  Compatible with
+        get_summed_histogram without modification.
+    mc_attrs : dict
+        MC-specific metadata (mc_gas, mc_T_sensor, mc_alpha, mc_n_windows, …).
+    mc_injected : dict or None
+        If the file contains 'mc_injected' group (truth info), a dict with:
+          'q_true_kev'  : (N,) float64 — true |qz| in keV/c
+          'positions'   : (N,) int32   — peak sample position in analysis window
+          'signs'       : (N,) int8    — ±1 injection sign
+          'window_idx'  : (N,) int32   — analysis window index
+        Sub-window index: (positions - lb) // search_window_length.
+        None if the group is absent (older MC files).
+    """
+    row = read_recon(filepath)   # (amps, good_det, noise_lv, chi2, f_res, drv_pwr, p, idx, cal_idx, a2k)
+    recon_output = tuple([x] for x in row)
+
+    with h5py.File(filepath, 'r') as f:
+        mc_attrs = {k: v for k, v in f['data_processed'].attrs.items()
+                    if k.startswith('mc_')}
+
+        if 'mc_injected' in f:
+            ig = f['mc_injected']
+            mc_injected = {k: ig[k][:] for k in ig}
+        else:
+            mc_injected = None
+
+    return recon_output, mc_attrs, mc_injected
 
 
 def throw_away_doublecounts(amplitude, good_det_noise, idx_in_window,
@@ -236,9 +280,9 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
     detected amplitude is timing-coincident with an applied calibration pulse
     AND has amplitude above the calibration pulse threshold.
 
-    The expected peak position is [pulse_index + offset,
-    pulse_index + offset + search_window_length), matching the search window
-    used by get_search_window() in analysis_utils.py (pulse_length=20).
+    The nearest cal pulse trigger is found in either direction. timing_match is
+    True when the detected peak falls within ±search_window_length samples of
+    pulse_index + offset, i.e. |abs_idx - nearest_pulse - offset| < search_window_length.
 
     Parameters
     ----------
@@ -252,7 +296,7 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
         Minimum amplitude (keV/c) for a detection to be considered a cal pulse
         (default 700 keV/c; applied impulses are ~1100 keV/c).
     offset : int
-        Sample offset from trigger to start of search window (default 20).
+        Sample offset from trigger to centre of acceptance window (default 20).
 
     Returns
     -------
@@ -266,14 +310,22 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
     abs_idx = (window_offsets[:, np.newaxis] + idx_in_window.astype(np.int64)).ravel()
 
     sorted_pulses = np.sort(pulse_indices.astype(np.int64))
-    # For each detected peak, find the nearest pulse trigger to the left
-    pos = np.searchsorted(sorted_pulses, abs_idx, side='right') - 1
-
-    timing_match = np.zeros(abs_idx.shape, dtype=bool)
-    valid = (pos >= 0) & (pos < sorted_pulses.size)
-    delta = np.where(valid, abs_idx - sorted_pulses[np.clip(pos, 0, sorted_pulses.size - 1)],
-                     np.int64(-1))
-    timing_match = (delta >= offset) & (delta < offset + search_window_length)
+    # For each detected peak, find the nearest cal pulse trigger (left or right)
+    pos = np.searchsorted(sorted_pulses, abs_idx, side='left')
+    left_pos  = np.clip(pos - 1, 0, sorted_pulses.size - 1)
+    right_pos = np.clip(pos,     0, sorted_pulses.size - 1)
+    left_pulse  = sorted_pulses[left_pos]
+    right_pulse = sorted_pulses[right_pos]
+    has_left  = pos > 0
+    has_right = pos < sorted_pulses.size
+    nearest_pulse = np.where(
+        has_left & has_right,
+        np.where(np.abs(abs_idx - left_pulse) <= np.abs(abs_idx - right_pulse),
+                 left_pulse, right_pulse),
+        np.where(has_left, left_pulse, right_pulse),
+    )
+    delta = abs_idx - nearest_pulse
+    timing_match = np.abs(delta - offset) < search_window_length
 
     a2k = file_amp2kev if file_amp2kev is not None else amp2kev_from_cal
     amp_match = np.abs(amplitude.ravel()) * a2k > amp_thr_kev
@@ -396,7 +448,10 @@ def get_summed_histogram(recon_output, bins, remove_doublecounts=True,
 
 
 def mean_pressure(recon_output):
-    return float(np.mean(recon_output[6]))
+    # Reject pressure that are negative, which is likely due to
+    # problematic readout of the pressure gauge
+    p_all = np.asarray(recon_output[6])
+    return float(np.mean(p_all[p_all > 0]))
 
 
 if __name__ == '__main__':

@@ -165,10 +165,11 @@ template_half_len      = 250    # chi2 window (500 total)
 ```
 
 ### Quality cuts (sphere_20260215)
+These values are subject to change — `recon_histograms.py` has the authoritative current values.
 ```python
 noise_threshold_kev              = 70      # keV/c (noise_level_amp * amp2kev)
 normalized_drive_power_threshold = 4.5e-9  # drive_area * (f_res²-drive_freq²)² / (ref_freq²-drive_freq²)²
-chi2_threshold                   = 700     # total chi2 (not per-dof)
+chi2_threshold                   = 600     # total chi2 (not per-dof)
 ```
 
 ## Active Experiments (Mar 2026)
