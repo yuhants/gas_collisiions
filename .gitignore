@@ -14,3 +14,8 @@ data_processed/
 # COMSOL model files (too large for git)
 *.mph
 comsol_model/
+
+# Journal submission material (contains nested clones of the paper and
+# nanospheres repos, plus large PDFs/zips)
+submission/
+resubmission/

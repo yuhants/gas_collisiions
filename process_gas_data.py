@@ -88,7 +88,7 @@ amp2kev_from_cal = 10497.219118653622        # sphere_20260215; after introducin
 # The summary for each gas type lives at:
 #   {cal_summary_base}/{data_type}/{sphere}_{gas_type}_cal_summary.hdf5
 # where gas_type = data_type with the trailing '_data' stripped.
-cal_summary_base  = (rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/'
+cal_summary_base  = (rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/'
                      rf'gas_data_processed/{sphere}')
 template_half_len = 250   # samples each side of peak used as chi-square template (500 total)
 
@@ -157,7 +157,7 @@ def homodyne_lose_lock(zz_windowed, zz_bp_windowed):
         return True
 
 def get_normalized_template(sphere, bounds=(1250, 1750), downsampled=False):
-    pulse_shape_file = np.load(rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}/{sphere}_impulse_recon_combined.npz')
+    pulse_shape_file = np.load(rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/pulse_calibration/{sphere}/{sphere}_impulse_recon_combined.npz')
     pulse_shape_template = pulse_shape_file['ps_20v']
 
     normalized_template = pulse_shape_template / np.max(pulse_shape_template)
@@ -178,7 +178,7 @@ def load_cal_from_npz(sphere, bounds=(1250, 1750)):
     Used when both fixed_gamma_damping and fixed_c_imp are set, bypassing
     the per-dataset cal summary HDF5 entirely.
     """
-    npz_path = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}/{sphere}_impulse_recon_combined.npz'
+    npz_path = rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/pulse_calibration/{sphere}/{sphere}_impulse_recon_combined.npz'
     pulse_shape_file = np.load(npz_path)
     amp2kev = float(pulse_shape_file['amp2kev'])
 
@@ -255,7 +255,7 @@ def get_driven_power(dt, zz_windowed, drive_freq):
 def process_dataset(sphere, dataset, type, data_prefix, nfile, idx_start):
     data_dir = rf'/Volumes/LaCie/gas_collisions/{type}/{sphere}/{dataset}'
     # out_dir = rf'/Users/yuhan/work/nanospheres/data/gas_data_processed/{sphere}/{type}/{dataset}'
-    out_dir = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_data_processed/{sphere}/{type}/{dataset}'
+    out_dir = rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/gas_data_processed/{sphere}/{type}/{dataset}'
     
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)
@@ -617,7 +617,7 @@ def process_dataset_cal_mode(sphere, dataset, type, data_prefix, nfile, idx_star
     then uses that scaling for all files.
     """
     data_dir = rf'/Volumes/LaCie/gas_collisions/{type}/{sphere}/{dataset}'
-    out_dir  = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_data_processed/{sphere}/{type}/{dataset}'
+    out_dir  = rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/gas_data_processed/{sphere}/{type}/{dataset}'
 
     if not os.path.isdir(out_dir):
         os.makedirs(out_dir)

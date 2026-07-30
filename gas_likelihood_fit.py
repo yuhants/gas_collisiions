@@ -666,7 +666,7 @@ if __name__ == '__main__':
     sphere = 'sphere_20260215'
     k_negbin = None                       # set to a float to use negbin likelihood
 
-    base_dir = r'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed'
+    base_dir = r'/Users/yuhan/work/nanospheres/gas_collisions/data_processed'
     recon_file = os.path.join(base_dir, 'gas_recon', f'{sphere}_gas_recon_all.h5py')
     signal_file = os.path.join(base_dir, 'gas_signal', 'xe_signal_5e-08nm_1e-08mbar.npz')
     out_dir    = os.path.join(base_dir, 'likelihood_fit')

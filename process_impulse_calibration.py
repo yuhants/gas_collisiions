@@ -39,7 +39,7 @@ data_prefix = '20260219_dfg_p6e_200ns_'
 voltages = [2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20]
 
 data_root = rf'/Volumes/LaCie/gas_collisions/pulse_calibration/{sphere}'
-out_dir   = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/pulse_calibration/{sphere}'
+out_dir   = rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/pulse_calibration/{sphere}'
 
 ## Analysis settings
 # bandpass_lb, bandpass_ub = (35000, 70000) # Analysis bandwidth in Hz (Sphere 20251212)

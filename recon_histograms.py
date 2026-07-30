@@ -11,10 +11,10 @@ amp2kev_from_cal = 10497.219118653622    # sphere_20260215; after introducing im
 
 # Path to processed gas data
 # processed_data_dir = r'/Users/yuhan/work/nanospheres/data/gas_data_processed' # directory for old noise model
-processed_data_dir = rf'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_data_processed'
+processed_data_dir = rf'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/gas_data_processed'
 
 # Output directory and filename
-outdir = r'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_recon'
+outdir = r'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/gas_recon'
 outfile_name = f'{sphere}_gas_recon_all.h5py'
 
 # Histogram bins (keV/c)
@@ -22,7 +22,7 @@ hist_bins = np.arange(0, 2000, 25)
 
 # Quality cut parameters
 noise_threshold_kev = 100
-chi2_threshold = 1000
+chi2_threshold = 600
 normalized_drive_power_threshold = 4.5e-9
 
 # Analysis window structure (must match process_gas_data.py)
@@ -333,7 +333,8 @@ def flag_cal_pulses(idx_in_window, pulse_indices, amplitude,
 
 
 def get_summed_histogram(recon_output, bins, remove_doublecounts=True,
-                         apply_noise_cut=True, apply_drive_cut=True, apply_chi2_cut=True):
+                         apply_noise_cut=True, apply_drive_cut=True, apply_chi2_cut=True,
+                         chi2_threshold_override=None):
     """
     Build summed amplitude histograms over all files in recon_output.
 
@@ -350,6 +351,8 @@ def get_summed_histogram(recon_output, bins, remove_doublecounts=True,
         Apply normalized_drive_power_threshold cut (default True).
     apply_chi2_cut : bool
         Null amplitudes where chi2 >= chi2_threshold (default True).
+    chi2_threshold_override : float or None
+        If given, use this value instead of the module-level chi2_threshold.
 
     Returns
     -------
@@ -432,9 +435,10 @@ def get_summed_histogram(recon_output, bins, remove_doublecounts=True,
         _accumulate('drive', amps_raw, mask_drive, is_cal)
 
         # --- Stage: + chi2 ---
+        _chi2_thr = chi2_threshold if chi2_threshold_override is None else chi2_threshold_override
         amps_chi2 = np.array(amps_raw)
         if apply_chi2_cut:
-            amps_chi2[chi2_all[i] >= chi2_threshold] = np.nan
+            amps_chi2[chi2_all[i] >= _chi2_thr] = np.nan
         _accumulate('chi2', amps_chi2, mask_drive, is_cal)
 
         # --- Stage: + double-count removal ---

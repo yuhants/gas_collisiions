@@ -150,6 +150,6 @@ if __name__ == '__main__':
 
             drdqz_all[i][j] = drdqz
     
-    outdir = r'/Users/yuhan/work/nanospheres/gas_collisiions/data_processed/gas_signal'
-    np.savez(f'{outdir}/xe_signal_{sphere_radius}nm_{p_mbar}mbar.npz', pressure=p_mbar, alpha_list=alpha_list, ts_list=ts_list, qq_kev=qq_kev, drdqz=drdqz_all)
+    outdir = r'/Users/yuhan/work/nanospheres/gas_collisions/data_processed/gas_signal'
+    np.savez(f'{outdir}/xe_signal_{sphere_radius}m_{p_mbar}mbar.npz', pressure=p_mbar, alpha_list=alpha_list, ts_list=ts_list, qq_kev=qq_kev, drdqz=drdqz_all)
 
